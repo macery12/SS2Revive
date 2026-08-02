@@ -1,0 +1,122 @@
+using System;
+using SS2ReviveData;
+using UnityEngine;
+
+namespace SS2Revive
+{
+    /// <summary>
+    /// Owns the in-process backend and connects it to the two things it cannot reach on its own:
+    /// the game's install directory, and Steam.
+    ///
+    /// <see cref="SS2ReviveData.LocalBackend"/> deliberately knows nothing about Unity or
+    /// Steamworks - it targets netstandard2.0 and has no package references, which is what lets it
+    /// stay a plain, testable library rather than something only reachable through a running game.
+    /// Everything platform-shaped lives here instead.
+    /// </summary>
+    internal static class LocalBackendHost
+    {
+        private static LocalBackend _backend;
+
+        internal static bool Available => _backend != null;
+
+        internal static LocalBackend Backend => _backend;
+
+        private static bool _identityResolved;
+
+        internal static void Initialise()
+        {
+            var options = new LocalBackendOptions
+            {
+                // Application.dataPath is the "<game>_Data" folder, which is where
+                // StreamingAssets/Content/Data lives. The catalogue is read from the player's own
+                // installation at startup, so nothing has to be extracted, shipped, or kept in
+                // step with a game update by hand.
+                ContentDirectory = Application.dataPath,
+                SaveDirectory = Plugin.SaveDirectory.Value,
+                GrantAllCosmetics = Plugin.GrantAllCosmetics.Value,
+
+                // LocalPlayerId is deliberately left unset - see EnsureLocalIdentity.
+            };
+
+            try
+            {
+                _backend = new LocalBackend(options,
+                    message => Plugin.Log.LogInfo(message),
+                    message => Plugin.Log.LogWarning(message));
+            }
+            catch (Exception ex)
+            {
+                _backend = null;
+                Plugin.Log.LogError("Local backend failed to start: " + ex);
+                return;
+            }
+
+            _backend.Peers = SteamPeers.Directory;
+
+            Plugin.Log.LogInfo("Local backend ready: " + _backend.Describe());
+            Plugin.Log.LogInfo("Progress is saved in " + _backend.SaveDirectory
+                               + " - outside the game folder, so a Steam file verification or a "
+                               + "BepInEx reinstall cannot remove it.");
+        }
+
+        /// <summary>
+        /// Tells the backend who "self" is, once Steam can answer that.
+        ///
+        /// It cannot be captured at construction. BepInEx runs a plugin's Awake long before the
+        /// game reaches <c>Shell.OnStart -> InitPlatforms</c>, so <c>SteamAPI.Init</c> has not run
+        /// and <c>SteamIdentity</c> would hand back its offline placeholder.
+        ///
+        /// Getting this wrong is not cosmetic. The client asks for its own progression and a
+        /// friend's through the same endpoint, distinguished only by the id in the path, so a
+        /// backend holding a stale identity would treat the player's own progression as a
+        /// stranger's and refuse it - which reads, from the game, as progression never loading.
+        ///
+        /// Polled rather than pushed because it has to be right regardless of which patches are
+        /// enabled: with the auth bypass turned off there is no point in our code that observes
+        /// sign-in at all. Once resolved this is a single bool test per frame.
+        /// </summary>
+        internal static void EnsureLocalIdentity()
+        {
+            if (_identityResolved) return;
+
+            var backend = _backend;
+            if (backend == null) return;
+
+            // Polling stops on a real Steam account and only on a real one. The offline
+            // placeholder is still installed in the meantime, because the game mints exactly the
+            // same placeholder for itself when Steam is missing - so the two agree, and a session
+            // without Steam still gets its progression rather than a permanent 404.
+            var steamId = SteamIdentity.GetSteamId64();
+            var playerId = steamId != 0UL
+                ? SteamIdentity.BuildPlayerIdString(steamId)
+                : SteamIdentity.GetLocalPlayerId().ToString();
+
+            if (steamId != 0UL) _identityResolved = true;
+
+            if (string.Equals(backend.LocalPlayerId, playerId, StringComparison.Ordinal)) return;
+
+            backend.LocalPlayerId = playerId;
+
+            var personaName = SteamIdentity.GetPersonaName();
+            if (!string.IsNullOrEmpty(personaName))
+                backend.SetUserName(playerId, personaName);
+
+            Plugin.Log.LogInfo("Local backend is serving " + playerId + " as the local player.");
+        }
+
+        internal static LocalResponse Handle(string verb, string path, string body)
+        {
+            var backend = _backend;
+            if (backend == null) return LocalResponse.Failed("LOCAL_BACKEND_UNAVAILABLE");
+            return backend.Handle(verb, path, body);
+        }
+
+        /// <summary>Called from the progression-persist patch. Silently ignored when the local
+        /// backend is not the one answering, so the patch does not have to know the mode.</summary>
+        internal static void MirrorProgression(string playerId, long seasonXp, int seasonLevel,
+                                               int globalLevel)
+        {
+            _backend?.MirrorProgression(playerId, seasonXp, seasonLevel, globalLevel);
+        }
+    }
+}

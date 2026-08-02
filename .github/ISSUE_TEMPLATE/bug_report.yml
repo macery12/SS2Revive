@@ -1,0 +1,148 @@
+name: Bug report
+description: Something in the mod does not work
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. The log file is the part that actually gets things fixed, so
+        please attach it even if the problem looks obvious.
+
+        **Before you post:** the log contains your SteamID64, on the line that reads
+        `Local backend is serving STEAM-...`. That number identifies your Steam profile. It is not
+        a password and nobody can sign in with it, but if you would rather not have it public,
+        replace the digits with `x` before pasting.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before reporting
+      options:
+        - label: I searched the existing issues and this is not already reported
+          required: true
+        - label: I am using the x64 build of BepInEx, not the 32-bit one
+          required: true
+        - label: My copy of the game is the official Steam release
+          required: true
+        - label: I tried it with SS2Revive as the only plugin installed
+          required: false
+
+  - type: input
+    id: mod-version
+    attributes:
+      label: SS2 Revive version
+      description: >-
+        The first SS2 Revive line in the log says it: `SS2 Revive 0.2.0 starting.`
+      placeholder: "0.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: game-build
+    attributes:
+      label: Game build
+      description: >-
+        The line straight after that one, at the end: `Unity ... | product ... | version '1.3.1.276'`.
+        Anything other than 1.3.1.276 is untested, which is worth knowing rather than a reason not
+        to report.
+      placeholder: "1.3.1.276"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw. A screenshot or a short clip helps for anything visual.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What you did, in order, starting from launching the game.
+      placeholder: |
+        1. Launched the game
+        2. Opened the party menu
+        3. Invited a friend with F10
+        4. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: false
+
+  - type: dropdown
+    id: multiplayer
+    attributes:
+      label: When does it happen
+      description: >-
+        Party bugs usually behave differently for the person who started the lobby and the person
+        who joined it, so this narrows things down a long way.
+      options:
+        - Playing alone
+        - In a party, and I started the lobby
+        - In a party, and I joined someone else's
+        - In a party, everyone sees it
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend-mode
+    attributes:
+      label: Backend mode
+      description: "`Backend.Mode` in `BepInEx\\config\\dev.ss2revive.core.cfg`. Leave as Local if you never changed it."
+      options:
+        - Local (default)
+        - "Off"
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: LogOutput.log
+      description: >-
+        From `Surgeon Simulator 2\BepInEx\LogOutput.log`, after a run where the problem happened.
+        Paste the whole file, or drag it into this box to attach it. Do not trim it to the lines
+        you think matter; what came earlier is usually the cause.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: probe
+    attributes:
+      label: F9 diagnostic dump
+      description: >-
+        Optional, and worth including for anything to do with parties, progression or cosmetics.
+        Press F9 in game while the problem is visible, then copy the block it writes to the log.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: other-mods
+    attributes:
+      label: Other mods installed
+      description: Everything else in `BepInEx\plugins`, or "none".
+      placeholder: none
+    validations:
+      required: false
+
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it started after something changed, whether it happens every time or now and then,
+        and anything you already tried.
+    validations:
+      required: false

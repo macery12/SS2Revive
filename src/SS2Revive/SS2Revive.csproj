@@ -1,0 +1,117 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>SS2Revive</AssemblyName>
+    <RootNamespace>SS2Revive</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Version>0.2.0</Version>
+    <DebugType>portable</DebugType>
+    <!-- The game ships assemblies that reference types we do not resolve; do not fail on that. -->
+    <NoWarn>$(NoWarn);CS0436;MSB3277</NoWarn>
+  </PropertyGroup>
+
+  <!--
+    GameDir and GameManagedDir are resolved in Directory.Build.props at the repository root, which
+    finds the install through Steam rather than through a path someone typed once.
+  -->
+  <Target Name="CheckGameDir" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="'$(GameManagedDir)' == '' or !Exists('$(GameManagedDir)\Assembly-CSharp.dll')"
+           Text="Could not find your Surgeon Simulator 2 install. Looked for Assembly-CSharp.dll under '$(GameManagedDir)'. Either build with -p:GameDir=&quot;full\path\to\Surgeon Simulator 2&quot;, or copy Directory.Build.user.props.example to Directory.Build.user.props and set GameDir there." />
+  </Target>
+
+  <ItemGroup>
+    <!-- Reference assemblies so net472 builds without Visual Studio installed. -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+
+    <!--
+      BepInEx and HarmonyX come from NuGet so that a fresh clone builds with nothing to install by
+      hand. ExcludeAssets="runtime" keeps them out of bin: the loader supplies its own copies at
+      runtime, and shipping a second set next to the plugin is how you get two Harmony versions
+      arguing with each other.
+
+      NuGet publishes 5.4.21 while the loader the README points at is 5.4.23.2. That gap is fine to
+      compile against, because nothing this plugin touches changed between them.
+    -->
+    <PackageReference Include="BepInEx.Core" Version="5.4.21" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      The serverless backend: the request router, the Inventory.dat reader, the challenge
+      catalogue, and the JSON writer that knows what the client's deserialiser can survive.
+
+      It is a separate assembly rather than more files in this one so that the facts which were
+      expensive to work out - which JSON key the client actually reads, why an incomplete inventory
+      response deletes hats, why a 5xx wedges the request scheduler - sit in one place with no
+      Unity, BepInEx or Steamworks in scope. netstandard2.0 is the ceiling for net472, and is also
+      what would let the same assembly serve a standalone host if one is ever wanted again.
+    -->
+    <ProjectReference Include="..\SS2Revive_Data\SS2Revive_Data.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Label="Game">
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(GameManagedDir)\Assembly-CSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Steamworks.NET">
+      <HintPath>$(GameManagedDir)\Steamworks.NET.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(GameManagedDir)\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameManagedDir)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(GameManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!--
+    The main menu news tiles. assets\newsfeed\NewsFeed.json is the authored copy and the one to
+    edit; it lands beside the plugin, where NewsFeed.cs reads it over file:// with no server
+    involved. The string baked into NewsFeed.cs is only a fallback for a loose DLL with no assets
+    folder next to it.
+
+    The images are deliberately absent. The game's own tile artwork is seeded at runtime from the
+    player's own StreamingAssets folder, because those files belong to Bossa and copying them into
+    a public repository would be redistributing them.
+  -->
+  <ItemGroup Label="News feed">
+    <NewsFeedAssets Include="$(MSBuildThisFileDirectory)..\..\assets\newsfeed\**\*" Exclude="$(MSBuildThisFileDirectory)..\..\assets\newsfeed\**\.gitkeep" />
+    <None Include="@(NewsFeedAssets)" Link="newsfeed\%(RecursiveDir)%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!--
+    Drop the built plugin straight into the game's BepInEx plugins folder.
+
+    Both assemblies go, and into the same folder: BepInEx resolves a plugin's dependencies from
+    alongside the plugin, so SS2Revive_Data.dll must sit next to SS2Revive.dll rather than in
+    a subfolder of its own.
+  -->
+  <Target Name="DeployToGame" AfterTargets="Build" Condition="Exists('$(GameDir)\BepInEx')">
+    <ItemGroup>
+      <DeployFiles Include="$(TargetPath)" />
+      <DeployFiles Include="$(TargetDir)SS2Revive_Data.dll" />
+      <DeployFiles Include="$(TargetDir)$(AssemblyName).pdb" Condition="Exists('$(TargetDir)$(AssemblyName).pdb')" />
+      <DeployFiles Include="$(TargetDir)SS2Revive_Data.pdb" Condition="Exists('$(TargetDir)SS2Revive_Data.pdb')" />
+    </ItemGroup>
+    <MakeDir Directories="$(GameDir)\BepInEx\plugins\SS2Revive" />
+    <Copy SourceFiles="@(DeployFiles)" DestinationFolder="$(GameDir)\BepInEx\plugins\SS2Revive" ContinueOnError="true" />
+    <Copy SourceFiles="@(NewsFeedAssets)" DestinationFolder="$(GameDir)\BepInEx\plugins\SS2Revive\newsfeed\%(RecursiveDir)" SkipUnchangedFiles="true" ContinueOnError="true" />
+    <Message Importance="high" Text="SS2Revive -> $(GameDir)\BepInEx\plugins\SS2Revive" />
+  </Target>
+
+</Project>

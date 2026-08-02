@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A console runner rather than a test framework, so this needs nothing restored from the network
+    and can be run on a machine that only has the SDK. `dotnet run` is the whole story; a non-zero
+    exit code means something is wrong.
+
+    It exercises the real assembly against the real installed game files. The Inventory.dat parser
+    in particular cannot be meaningfully tested against a fixture - the point of it is that it
+    agrees with what Bossa actually shipped.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>SS2ReviveData.Tests</AssemblyName>
+    <RootNamespace>SS2ReviveData.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SS2Revive_Data\SS2Revive_Data.csproj" />
+  </ItemGroup>
+
+  <!--
+    Hand the game location that Directory.Build.props already worked out through to the runner,
+    which is a separate process and cannot see MSBuild properties any other way. It lands in a
+    generated attribute under obj\, so no install path reaches a source file.
+  -->
+  <ItemGroup Condition="'$(GameDir)' != ''">
+    <AssemblyMetadata Include="GameDir" Value="$(GameDir)" />
+  </ItemGroup>
+
+</Project>

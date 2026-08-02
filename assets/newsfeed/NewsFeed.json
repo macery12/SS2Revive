@@ -1,0 +1,22 @@
+{
+    "NewsTiles": [
+        {
+            "ImageUrl": "tile-1.png",
+            "ClickUrl": "",
+            "Title": "Multiplayer Restored",
+            "SubTitle": "Parties, invites, and online play are back through Steam. Join friends or invite them directly using Steam."
+        },
+        {
+            "ImageUrl": "tile-2.png",
+            "ClickUrl": "",
+            "Title": "Daily Challenges",
+            "SubTitle": "Three challenges are available every day, now served locally by SS2Revive."
+        },
+        {
+            "ImageUrl": "tile-3.png",
+            "ClickUrl": "https://github.com/macery12/SS2Revive/issues",
+            "Title": "Found a Bug?",
+            "SubTitle": "Click here to report issues or follow development on GitHub."
+        }
+    ]
+}

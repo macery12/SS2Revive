@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Two targets, and the net472 one is not optional.
+
+    netstandard2.0 is the portable form and is what the test project (net8.0) references. But a
+    netstandard2.0 assembly carries a reference to `netstandard, Version=2.0.0.0`, and the game
+    does not ship that facade - there is no netstandard.dll anywhere in
+    `Surgeon Simulator 2_Data\Managed`. Mono cannot resolve it, so any reflection over this
+    assembly's types throws ReflectionTypeLoadException.
+
+    That is not a quiet failure. `Telemetry.Service.ConfigureListeners` calls GetExportedTypes()
+    over every assembly loaded into the AppDomain, ours included, on the path
+    Shell.OnStart -> AnalyticsService.Initialise -> Analytics.Init. One unresolvable reference
+    there takes down the whole shell: the game boots to a black screen with no main menu, and the
+    only clue is a ReflectionTypeLoadException with no type names in it.
+
+    net472 is what BepInEx loads the plugin as and what the game's own assemblies resolve against,
+    so that is the target which actually ships next to the plugin.
+
+    Zero package references beyond the net472 reference assemblies, on purpose. Everything here -
+    including the JSON reader and writer - is hand-rolled so this can be dropped next to the plugin
+    with no dependency resolution at all, and so the escaping rules stay under our control. See
+    Json.cs for why that second point is not merely tidiness.
+  -->
+  <PropertyGroup>
+    <TargetFrameworks>net472;netstandard2.0</TargetFrameworks>
+    <AssemblyName>SS2Revive_Data</AssemblyName>
+    <RootNamespace>SS2ReviveData</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Version>0.2.0</Version>
+    <DebugType>portable</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
+    <!-- Reference assemblies so net472 builds without Visual Studio installed. -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

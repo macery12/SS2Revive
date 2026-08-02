@@ -1,0 +1,19 @@
+<Project>
+
+  <!--
+    Copy this file to Directory.Build.user.props (drop the .example) and point GameDir at your own
+    install. That filename is gitignored, so your paths never reach the repository.
+
+    You only need this if the build cannot find the game on its own, which happens when Steam keeps
+    the game in a library folder on a second drive, or when you run a copy of the game outside
+    Steam entirely.
+
+    The folder wanted is the one containing the .exe, so that
+    "$(GameDir)\Surgeon Simulator 2_Data\Managed\Assembly-CSharp.dll" exists.
+  -->
+
+  <PropertyGroup>
+    <GameDir>D:\SteamLibrary\steamapps\common\Surgeon Simulator 2</GameDir>
+  </PropertyGroup>
+
+</Project>

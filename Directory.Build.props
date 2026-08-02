@@ -1,0 +1,33 @@
+<Project>
+
+  <!--
+    Works out where Surgeon Simulator 2 is installed, so no path from anyone's machine has to be
+    committed. Resolution order, first hit wins:
+
+      1. -p:GameDir=...                     on the command line
+      2. Directory.Build.user.props         a local, gitignored file (copy the .example next to it)
+      3. the SS2_GAME_DIR environment variable
+      4. Steam's own install path from the registry, plus the default library
+      5. Steam in Program Files (x86), for the case where the registry key is missing
+
+    A library folder on another drive will not be found by 4 or 5. Use option 2 for that; the
+    example file explains how.
+  -->
+
+  <Import Project="$(MSBuildThisFileDirectory)Directory.Build.user.props"
+          Condition="Exists('$(MSBuildThisFileDirectory)Directory.Build.user.props')" />
+
+  <PropertyGroup Label="Game location">
+    <GameDir Condition="'$(GameDir)' == ''">$(SS2_GAME_DIR)</GameDir>
+
+    <SteamDir Condition="'$(SteamDir)' == '' and '$(OS)' == 'Windows_NT'">$([MSBuild]::GetRegistryValueFromView('HKEY_CURRENT_USER\SOFTWARE\Valve\Steam', 'SteamPath', null, RegistryView.Registry64, RegistryView.Registry32))</SteamDir>
+
+    <GameDir Condition="'$(GameDir)' == '' and '$(SteamDir)' != '' and Exists('$(SteamDir)\steamapps\common\Surgeon Simulator 2')">$(SteamDir)\steamapps\common\Surgeon Simulator 2</GameDir>
+
+    <SteamDefaultDir>$([System.Environment]::GetFolderPath(SpecialFolder.ProgramFilesX86))\Steam</SteamDefaultDir>
+    <GameDir Condition="'$(GameDir)' == '' and Exists('$(SteamDefaultDir)\steamapps\common\Surgeon Simulator 2')">$(SteamDefaultDir)\steamapps\common\Surgeon Simulator 2</GameDir>
+
+    <GameManagedDir Condition="'$(GameManagedDir)' == '' and '$(GameDir)' != ''">$(GameDir)\Surgeon Simulator 2_Data\Managed</GameManagedDir>
+  </PropertyGroup>
+
+</Project>

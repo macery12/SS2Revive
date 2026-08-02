@@ -1,0 +1,47 @@
+name: Suggestion
+description: Something the mod could restore or do better
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This mod exists to make a shut-down game work again, so the most useful suggestions are
+        usually about something the game used to do and no longer does.
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Is this restoring something, or new
+      options:
+        - Something the game did before the servers shut down
+        - Something new that the game never did
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it matters
+      description: >-
+        What you cannot do today because of it. Concrete beats general: "the level select shows
+        no grades after a campaign run" is easier to act on than "campaign feels incomplete".
+    validations:
+      required: false
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Anything you already know about how it worked
+      description: >-
+        If you remember what it looked like before the shutdown, or you have old screenshots or
+        video, say so here. Working out the original behaviour is usually the slow part.
+    validations:
+      required: false

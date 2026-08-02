@@ -1,0 +1,27 @@
+# Build output
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.idea/
+.vscode/
+
+# Local machine paths live here and must never be published.
+Directory.Build.user.props
+
+# Working notes and protocol write-ups. Kept on disk, not in the repository.
+docs/
+
+# BepInEx is linked from the README, never vendored here.
+lib/
+BepInEx/
+
+# Packaged releases
+dist/
+*.zip
+
+# Game files. Nothing extracted from the installed game belongs in here, including
+# Inventory.dat, ProgressionConfig.json and the news tile artwork.
+*.dat
+assets/newsfeed/images/*.png
