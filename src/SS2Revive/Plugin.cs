@@ -65,6 +65,8 @@ namespace SS2Revive
         internal static ConfigEntry<bool> HttpFailFast;
         internal static ConfigEntry<bool> SkipMatchmaking;
         internal static ConfigEntry<bool> CreationMode;
+        internal static ConfigEntry<bool> FreeForAll;
+        internal static ConfigEntry<bool> FreeForAllIncludeGameLevels;
         internal static ConfigEntry<BackendMode> Backend;
         internal static ConfigEntry<bool> GrantAllCosmetics;
         internal static ConfigEntry<string> SaveDirectory;
@@ -112,6 +114,17 @@ namespace SS2Revive
                 + "complete or fail. Levels go to the SS2Revive folder beside your other saves, one "
                 + "folder each. Publishing works, but only you can see the result - there is no "
                 + "shared level browser left to publish to.");
+            FreeForAll = Config.Bind("FreeForAll", "Enabled", true,
+                "Draw the Free-for-all queue from the levels on this machine. Bossa served that "
+                + "queue from a curated slice of what the community had published, so without this "
+                + "the queue comes back empty and picking the mode drops you straight back into the "
+                + "lobby the moment the vactube finishes.");
+            FreeForAllIncludeGameLevels = Config.Bind("FreeForAll", "IncludeGameLevels", true,
+                "Let Free-for-all fall back on the levels that ship with the game. No free-for-all "
+                + "level ships with Surgeon Simulator 2, so these are the campaign levels, played "
+                + "with Quick Play scoring rather than campaign grading. On by default because a "
+                + "new install has no levels of its own and the mode would otherwise still be "
+                + "empty. Turn it off once you have built or been sent some.");
             Backend = Config.Bind("Backend", "Mode", BackendMode.Local,
                 "Where Bossa's dead HTTP calls are answered.\n"
                 + "Local - inside this DLL. No server, no port, nothing to maintain. Saves go to "

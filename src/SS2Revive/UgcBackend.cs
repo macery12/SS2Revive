@@ -211,6 +211,37 @@ namespace SS2Revive
             }
         }
 
+        /// <summary>
+        /// Every published level, answered on the spot rather than a frame later.
+        ///
+        /// <see cref="Search"/> defers because its callers were written around an HTTP round trip.
+        /// The free-for-all queue is the one caller that is not: it runs inside a Harmony prefix
+        /// that has to decide what the queue contains before it returns, so it needs the list now.
+        /// </summary>
+        internal static List<LevelSummaryData> PublishedSummaries()
+        {
+            var summaries = new List<LevelSummaryData>();
+            if (_store == null) return summaries;
+
+            try
+            {
+                int pageCount;
+                var matches = _store.Search(new UgcQuery
+                {
+                    Status = UgcStore.StatusPublished,
+                    ResultsPerPage = int.MaxValue,
+                }, out pageCount);
+
+                for (var i = 0; i < matches.Count; i++) summaries.Add(ToSummary(matches[i]));
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError("Reading the published level list failed: " + ex);
+            }
+
+            return summaries;
+        }
+
         // ----------------------------------------------------------------- edits
 
         internal static void Delete(UGCService2 service, string serverLevelId, Action succeeded, Action failed)

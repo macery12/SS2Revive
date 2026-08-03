@@ -134,6 +134,8 @@ defaults are meant to be the right answer, but the ones worth knowing about:
 | `Backend.GrantAllCosmetics` | `true` | Unlocks every cosmetic set. Set to `false` to earn them through the reward track instead. |
 | `Backend.SaveDirectory` | *(empty)* | Overrides where `progress.json` and your levels are written. |
 | `CreationMode.Enabled` | `true` | Saves levels you build to this machine. Turning it off puts Creation Mode back to loading into a black screen, because the game will not open a new level until it has uploaded it. |
+| `FreeForAll.Enabled` | `true` | Fills the Free-for-all queue from the levels on this machine. Bossa served that queue from published community levels, so without this it comes back empty and the mode drops you straight back into the lobby. |
+| `FreeForAll.IncludeGameLevels` | `true` | Lets Free-for-all fall back on the levels that ship with the game when your own library has nothing that fits the party. Those are the campaign levels — no free-for-all level ships with the game. |
 | `Party.SteamP2PTransport` | `true` | Sends gameplay traffic over Steam peer to peer. |
 | `Party.InviteKey` | `F10` | Opens the Steam invite overlay. |
 | `Party.ShareLevelOverSteam` | `true` | Publishes your season level to lobby members and friends. |

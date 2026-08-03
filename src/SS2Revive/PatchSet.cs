@@ -73,6 +73,12 @@ namespace SS2Revive
                     Report.Add("FAIL Creation Mode -> the level library could not be opened");
             }
 
+            // After the level library, because that is where the levels worth queueing come from.
+            // It works without one - the levels shipped with the game are still there - so this is
+            // not gated on Creation Mode having opened successfully.
+            if (Plugin.FreeForAll.Value)
+                FreeForAllQueue.Apply(harmony);
+
             // Start the backend before patching: whether anything is going to answer decides what
             // the HTTP prefix below does with each request. In Local mode this reads the game's
             // Inventory.dat and opens the save file, both of which want to have happened before
