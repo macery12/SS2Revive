@@ -1,6 +1,8 @@
 # SS2 Revive
 
-Built against **Surgeon Simulator 2 build 1.3.1.276** on Windows. Other builds are untested.
+Built against **Surgeon Simulator 2 builds 1.3.7.3054** on Windows, 
+Other builds are untested; 1.5.x will not work, because the
+offline patch removed the netcode this restores.
 
 > **Not affiliated with Bossa Studios or Curve Games.** This is an unofficial fan modification,
 > made to keep a game working after its servers were retired. It ships no game code and no game
@@ -86,6 +88,7 @@ defaults are meant to be the right answer, but the ones worth knowing about:
 
 | Setting | Default | What it does |
 |---|---|---|
+| `Bypass.ConnectionCheck` | `true` | Stops the game asking a shut-down server for permission to start. On 1.3.7 and later, turning this off leaves you at the "requires an active internet connection" box with nothing else in the mod ever reached. |
 | `Backend.Mode` | `Local` | Where the game's dead HTTP calls get answered. `Local` answers them in process, which needs nothing running. `Off` leaves them failing the way they do without the mod. |
 | `Backend.GrantAllCosmetics` | `true` | Unlocks every cosmetic set. Set to `false` to earn them through the reward track instead. |
 | `Backend.SaveDirectory` | *(empty)* | Overrides where `progress.json` and your levels are written. |

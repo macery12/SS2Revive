@@ -31,7 +31,7 @@ namespace SS2ReviveData.Tests
             {
                 RunJsonTests();
                 RunPlayerIdTests();
-                RunCatalogueTests(gameRoot);
+                RunCatalogueTests(gameRoot, scratch);
                 RunBackendTests(gameRoot, scratch);
                 RunChallengeRolloverTests(scratch);
                 RunUgcStoreTests(scratch);
@@ -202,9 +202,11 @@ namespace SS2ReviveData.Tests
 
         // -------------------------------------------------------------- catalogue
 
-        private static void RunCatalogueTests(string gameRoot)
+        private static void RunCatalogueTests(string gameRoot, string scratch)
         {
             Section("catalogue");
+
+            RunCatalogueFixtureTests(scratch);
 
             var contentDirectory = GameCatalogue.FindContentDirectory(gameRoot);
             if (contentDirectory == null)
@@ -213,11 +215,15 @@ namespace SS2ReviveData.Tests
                 return;
             }
 
-            var catalogue = GameCatalogue.Load(contentDirectory);
+            var warnings = new List<string>();
+            var catalogue = GameCatalogue.Load(contentDirectory, warnings.Add);
             Console.WriteLine("  read  " + catalogue.Summary());
+            foreach (var warning in warnings)
+                Console.WriteLine("  warn  " + warning);
 
-            // Load() throws unless the parse lands exactly on EOF, so reaching here is already the
-            // strongest available evidence that every field width was right.
+            // Load() throws unless every set a set-owning item names is actually defined, so
+            // reaching here is already the strongest available evidence that every field width was
+            // right - see GameCatalogue.Validate.
             Check("the set table is populated", catalogue.ItemSets.Count > 0);
             Check("the item table is populated", catalogue.Items.Count > 0);
             Check("some sets are free for everyone", catalogue.AssumeUnlockedItemSets.Count > 0);
@@ -247,6 +253,108 @@ namespace SS2ReviveData.Tests
                 PlayerInventory.SeasonLevelForXp(catalogue, first.CumulativeXp) == 2);
             Check("the level stops climbing past the end of the track",
                 PlayerInventory.SeasonLevelForXp(catalogue, long.MaxValue / 2) == catalogue.RewardTrack.Count);
+
+            // Not vacuous: the cross-reference above only proves anything while most items name a
+            // set. If a future build stopped attaching items to sets, Validate would still pass and
+            // would no longer be checking anything, and this is where that shows up.
+            var referencing = 0;
+            foreach (var item in catalogue.Items)
+                if (item.SetId != NullGuid) referencing++;
+
+            Check("most items name a set, which is what makes the parse checkable",
+                referencing > catalogue.Items.Count / 2);
+        }
+
+        private const string NullGuid = "00000000000000000000000000000000";
+
+        /// <summary>
+        /// The two things the shipped file cannot demonstrate on its own: that a build carrying
+        /// trailing bytes is still read (1.3.7.3054 repeats part of its own tail), and that a
+        /// misread is still refused rather than handed over as a catalogue.
+        /// </summary>
+        private static void RunCatalogueFixtureTests(string scratch)
+        {
+            var setId = new byte[16];
+            var itemId = new byte[16];
+            for (var i = 0; i < 16; i++) { setId[i] = (byte)(i + 1); itemId[i] = (byte)(0xF0 - i); }
+
+            var good = BuildInventoryDat(setId, itemId, itemSetId: setId);
+
+            var warnings = new List<string>();
+            var catalogue = LoadFixture(scratch, "clean", good, warnings.Add);
+            Check("a well formed fixture reads", catalogue != null
+                && catalogue.ItemSets.Count == 1 && catalogue.Items.Count == 1);
+            Check("and reports nothing", warnings.Count == 0);
+
+            // What 1.3.7.3054 actually ships: bytes past the last declared record.
+            var trailing = new List<byte>(good);
+            trailing.AddRange(good);
+            warnings.Clear();
+            catalogue = LoadFixture(scratch, "trailing", trailing.ToArray(), warnings.Add);
+            Check("trailing bytes do not lose the catalogue", catalogue != null
+                && catalogue.ItemSets.Count == 1 && catalogue.Items.Count == 1);
+            Check("but are reported", warnings.Count == 1
+                && warnings[0].Contains(good.Length.ToString()));
+
+            // A width read wrongly lands mid-record, and the set the item names stops resolving.
+            var orphan = BuildInventoryDat(setId, itemId, itemSetId: itemId);
+            warnings.Clear();
+            Check("an item pointing at an undefined set is refused",
+                LoadFixture(scratch, "orphan", orphan, warnings.Add) == null);
+
+            var shifted = new List<byte>(good);
+            shifted.Insert(0, 0);
+            Check("a file shifted out of alignment is refused",
+                LoadFixture(scratch, "shifted", shifted.ToArray(), _ => { }) == null);
+        }
+
+        /// <summary>One assume-unlocked set, one set, one item, in the layout the client writes.</summary>
+        private static byte[] BuildInventoryDat(byte[] setId, byte[] itemId, byte[] itemSetId)
+        {
+            var bytes = new List<byte>();
+
+            void Count(int value) => bytes.AddRange(BitConverter.GetBytes(value));
+            void Text(string value)
+            {
+                bytes.Add((byte)value.Length);            // varint, short enough to be one byte
+                foreach (var c in value)
+                {
+                    bytes.Add((byte)(c & 0xFF));
+                    bytes.Add((byte)(c >> 8));
+                }
+            }
+
+            Count(1);
+            bytes.AddRange(setId);                        // assumeUnlockedItemSets
+
+            Count(1);
+            bytes.AddRange(setId);
+            Text("Test Set");                             // itemSetDefinitions
+
+            Count(1);
+            bytes.AddRange(itemId);
+            bytes.AddRange(itemSetId);
+            Count(0);                                     // rarity
+            Text("test_hat_01");                          // itemDefinitions
+
+            return bytes.ToArray();
+        }
+
+        private static GameCatalogue LoadFixture(
+            string scratch, string name, byte[] bytes, Action<string> warn)
+        {
+            var directory = Path.Combine(scratch, "catalogue", name);
+            Directory.CreateDirectory(directory);
+            File.WriteAllBytes(Path.Combine(directory, "Inventory.dat"), bytes);
+
+            try
+            {
+                return GameCatalogue.Load(directory, warn);
+            }
+            catch (InvalidDataException)
+            {
+                return null;
+            }
         }
 
         // ---------------------------------------------------------------- backend

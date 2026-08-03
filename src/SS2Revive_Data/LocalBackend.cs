@@ -136,7 +136,7 @@ namespace SS2ReviveData
 
             try
             {
-                Catalogue = GameCatalogue.Load(directory);
+                Catalogue = GameCatalogue.Load(directory, _warn);
                 _info("Cosmetics catalogue: " + Catalogue.Summary() + ".");
             }
             catch (Exception ex)

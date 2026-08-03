@@ -39,6 +39,7 @@ namespace SS2Revive
 
         internal static ConfigEntry<bool> BypassAuth;
         internal static ConfigEntry<bool> BypassVersionGate;
+        internal static ConfigEntry<bool> BypassConnectionCheck;
         internal static ConfigEntry<bool> DisableVoip;
         internal static ConfigEntry<bool> StubDeadBackends;
         internal static ConfigEntry<bool> LocalParty;
@@ -70,6 +71,12 @@ namespace SS2Revive
                 "Skip the dead /auth/authenticate call and authenticate locally using the Steam identity.");
             BypassVersionGate = Config.Bind("Bypass", "VersionAndMaintenance", true,
                 "Treat the build as current and not in maintenance. The backing service is gone.");
+            BypassConnectionCheck = Config.Bind("Bypass", "ConnectionCheck", true,
+                "Stop asking a dead host for permission to start. Build 1.3.7 repointed the boot "
+                + "connectivity check from example.com at Bossa's own ss2.bsprd.uk, which no longer "
+                + "resolves, and the check gates the creation of the entire game shell. Turning "
+                + "this off on 1.3.7 or later leaves the game stuck on the 'requires an active "
+                + "internet connection' box, with nothing else in this plugin ever reached.");
             DisableVoip = Config.Bind("Bypass", "Voip", true,
                 "Stop Vivox from initialising or logging in. Its backend is gone.");
             StubDeadBackends = Config.Bind("Bypass", "DeadBackendCalls", true,

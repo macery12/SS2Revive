@@ -109,11 +109,13 @@ namespace SS2ReviveData
         /// ProgressionConfig.json leaves the reward track empty, which degrades to "no reward-track
         /// unlocks" rather than to a wrong catalogue.
         /// </summary>
-        public static GameCatalogue Load(string contentDirectory)
+        public static GameCatalogue Load(string contentDirectory, Action<string> warn = null)
         {
             var catalogue = new GameCatalogue();
 
-            catalogue.ReadInventoryDat(File.ReadAllBytes(Path.Combine(contentDirectory, "Inventory.dat")));
+            catalogue.ReadInventoryDat(
+                File.ReadAllBytes(Path.Combine(contentDirectory, "Inventory.dat")),
+                warn ?? delegate { });
 
             var configFile = Path.Combine(contentDirectory, "ProgressionConfig.json");
             if (File.Exists(configFile))
@@ -132,13 +134,20 @@ namespace SS2ReviveData
         ///
         /// Strings are a 7-bit varint length in UTF-16 code units followed by UTF-16LE data.
         ///
-        /// The EOF check at the end is not a nicety. The format has no internal framing or
-        /// checksum, so a field width guessed wrongly produces a parse that still "succeeds" with
-        /// garbage GUIDs. Landing exactly on the final byte is the only available evidence that
-        /// every width was right, and a wrong catalogue is worse than none - see
-        /// <see cref="PlayerInventory"/> for what the client does with an item it is not told about.
+        /// The three counts are the file's only framing. The format carries no checksum, so a field
+        /// width guessed wrongly produces a parse that still "succeeds" with garbage GUIDs, and a
+        /// wrong catalogue is worse than none - see <see cref="PlayerInventory"/> for what the
+        /// client does with an item it is not told about. <see cref="Validate"/> is what stands in
+        /// for the missing checksum.
+        ///
+        /// Trailing bytes are reported and ignored rather than treated as corruption. Build
+        /// 1.3.7.3054 ships an Inventory.dat that is byte-for-byte the 1.3.1 file plus 1639 bytes
+        /// of its own tail repeated - a fragment of one item's name, then items already declared
+        /// above. The counts are not raised to cover it, so the client reads the declared records
+        /// and stops, exactly as this does. Refusing the file over those bytes cost the player
+        /// every cosmetic for no gain.
         /// </summary>
-        private void ReadInventoryDat(byte[] buffer)
+        private void ReadInventoryDat(byte[] buffer, Action<string> warn)
         {
             var reader = new BinaryFields(buffer);
 
@@ -174,13 +183,80 @@ namespace SS2ReviveData
                     owner.Items.Add(item.ItemId);
             }
 
+            Validate();
+
             if (reader.Position != buffer.Length)
             {
-                throw new InvalidDataException(
-                    "Inventory.dat parse consumed " + reader.Position + " of " + buffer.Length
-                    + " bytes. The file layout is not what this build expects; refusing to use a "
-                    + "catalogue that may be wrong.");
+                warn("Inventory.dat declares " + Items.Count + " items in its first "
+                     + reader.Position + " bytes and then carries " + (buffer.Length - reader.Position)
+                     + " more the counts do not cover. Read the declared records, as the client "
+                     + "does, and ignored the rest.");
             }
+        }
+
+        /// <summary>
+        /// What the file's own structure says about whether we read it correctly.
+        ///
+        /// Every guess about a field width has to hold for all three tables at once, so a wrong one
+        /// does not produce a slightly-off catalogue - it produces GUIDs sliced out of the middle of
+        /// somebody's name. The cross-references are what make that visible: two thirds of the items
+        /// name a set, and a mis-parse resolves essentially none of them, where a correct parse
+        /// resolves all. An item naming no set at all is normal and stays unattached - those are the
+        /// campaign and promotional rewards, which the client cannot unlock through
+        /// UnlockInventoryItemSet either.
+        /// </summary>
+        private void Validate()
+        {
+            foreach (var set in ItemSets)
+                RequireName(set.Name, "an item set");
+
+            foreach (var id in AssumeUnlockedItemSets)
+                if (!_setsById.ContainsKey(id))
+                    throw new InvalidDataException(
+                        "Inventory.dat says item set " + id + " is unlocked for everyone, but no "
+                        + "such set is defined. The file layout is not what this build expects.");
+
+            var referencing = 0;
+            var resolved = 0;
+
+            foreach (var item in Items)
+            {
+                RequireName(item.Name, "an item");
+
+                if (item.SetId == NullGuid) continue;
+
+                referencing++;
+                if (_setsById.ContainsKey(item.SetId)) resolved++;
+            }
+
+            if (resolved != referencing)
+                throw new InvalidDataException(
+                    "Inventory.dat has " + (referencing - resolved) + " of " + referencing
+                    + " items pointing at an item set that is not defined. The file layout is not "
+                    + "what this build expects; refusing to use a catalogue that may be wrong.");
+        }
+
+        private const string NullGuid = "00000000000000000000000000000000";
+
+        /// <summary>
+        /// Control characters are the tell. A width read wrongly lands mid-record and decodes the
+        /// padding inside a GUID as text, which is where the NULs come from; real names have none.
+        /// Nothing here assumes the name is English or even Latin.
+        /// </summary>
+        private static void RequireName(string name, string what)
+        {
+            if (!string.IsNullOrEmpty(name))
+            {
+                var clean = true;
+                for (var i = 0; i < name.Length && clean; i++)
+                    if (name[i] < ' ') clean = false;
+
+                if (clean) return;
+            }
+
+            throw new InvalidDataException(
+                "Inventory.dat gave " + what + " an unreadable name. The file layout is not what "
+                + "this build expects; refusing to use a catalogue that may be wrong.");
         }
 
         /// <summary>

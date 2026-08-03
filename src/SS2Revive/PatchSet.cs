@@ -20,6 +20,11 @@ namespace SS2Revive
 
         internal static void ApplyAll(Harmony harmony)
         {
+            // First, because it is the only patch the game has to survive before any of the others
+            // can matter. Everything below runs inside a Shell that will not exist without it.
+            if (Plugin.BypassConnectionCheck.Value)
+                ApplyConnectionCheckBypass(harmony);
+
             if (Plugin.BypassAuth.Value)
                 ApplyAuthBypass(harmony);
 
@@ -106,6 +111,70 @@ namespace SS2Revive
             if (m == null)
                 throw new MissingMethodException(type.FullName + "." + name);
             return m;
+        }
+
+        // ---------------------------------------------------- boot connection check
+
+        private static MethodInfo _passConnectionCheck;
+
+        /// <summary>
+        /// Lets the game boot without Bossa's health check answering.
+        ///
+        /// This is the one patch whose absence hides every other one. <c>Bootstrap</c> gates the
+        /// whole game behind a single GET, and <c>PassConnectionCheck</c> - reached only when that
+        /// GET succeeds - is the sole caller of <c>InitialiseShell</c>. Build 1.3.1 pointed the
+        /// check at <c>https://www.example.com</c>, which always answered, so the gate was
+        /// invisible. Build 1.3.7 repointed it at <c>https://ss2.bsprd.uk/auth/healthcheck</c>,
+        /// which no longer resolves.
+        ///
+        /// A failed check therefore means no Shell, which means <c>Shell.OnStart</c> never runs,
+        /// which means <c>PlatformService.InitPlatforms</c> never calls <c>SteamAPI.Init</c>. The
+        /// visible symptom is a modal about needing an internet connection; the second, quieter one
+        /// is that Steamworks reports itself uninitialised for the rest of the session, because
+        /// nothing ever asked it to initialise.
+        ///
+        /// It goes through UnityWebRequest rather than CrappyHttpsRequestService, so none of the
+        /// HTTP interception further down this file can see it.
+        /// </summary>
+        private static void ApplyConnectionCheckBypass(Harmony harmony)
+        {
+            Try("Bootstrap.BootGame -> pass the connection check", () =>
+            {
+                var type = AccessTools.TypeByName("GameStateMachine.Bootstrap");
+                if (type == null) throw new TypeLoadException("GameStateMachine.Bootstrap");
+
+                _passConnectionCheck = Method(type, "PassConnectionCheck");
+                harmony.Patch(Method(type, "BootGame"),
+                    new HarmonyMethod(AccessTools.Method(typeof(PatchSet), nameof(BootGame_Prefix))));
+            });
+
+            // The same URL again, on a 35 second timer, once the game is running. Left alone it
+            // drops the same modal over whatever you are doing for the rest of the session.
+            Try("ConnectionService.Update -> no-op", () =>
+            {
+                harmony.Patch(Method(typeof(ConnectionService), "Update"),
+                    new HarmonyMethod(AccessTools.Method(typeof(PatchSet), nameof(SkipOriginal))));
+            });
+        }
+
+        /// <summary>
+        /// Take the branch the original takes when the host answers. <c>PassConnectionCheck</c>
+        /// guards on the same static flag the retry path relies on, so calling it directly is
+        /// exactly what a successful check would have done, minus the round trip.
+        /// </summary>
+        private static bool BootGame_Prefix(object __instance)
+        {
+            try
+            {
+                _passConnectionCheck.Invoke(__instance, null);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                // Better a modal the player can see than a game that never boots and says nothing.
+                Plugin.Log.LogError("Connection check bypass threw, letting the original run: " + ex);
+                return true;
+            }
         }
 
         // ---------------------------------------------------------------- auth
