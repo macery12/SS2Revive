@@ -33,6 +33,17 @@ namespace SS2ReviveData
     {
         public int PlayLevel = 25;
         public int WinLevel = 25;
+
+        /// <summary>
+        /// Read from the game's own config and then deliberately never applied.
+        ///
+        /// <c>CompleteQuickPlayLevel</c>'s request body carries <c>levelWon</c> and nothing about
+        /// whether the level was rated, so this third of the award cannot be observed from where
+        /// the backend sits. It is kept because it is part of the file being read and because a
+        /// future reader will otherwise wonder whether it was missed - it was not.
+        /// <c>LocalBackend.MirrorProgression</c> makes the omission harmless anyway: the client
+        /// grants rating XP locally and this backend copies the total it lands on.
+        /// </summary>
         public int RateLevel = 25;
     }
 

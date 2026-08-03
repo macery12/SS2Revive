@@ -1,9 +1,8 @@
 using System;
 using System.Collections.Generic;
-using System.Net;
-using System.Net.Security;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using Data;
 using Services;
 using SS2ReviveData;
@@ -11,15 +10,15 @@ using SS2ReviveData;
 namespace SS2Revive
 {
     /// <summary>
-    /// Sends Bossa's HTTP requests to a self-hosted replacement backend instead of to hosts that
-    /// no longer resolve.
+    /// Answers Bossa's HTTP requests in this process instead of letting them reach hosts that no
+    /// longer resolve.
     ///
     /// This has to intercept at <c>CrappyHttpsRequestService.Request</c> rather than by
     /// redirecting the hostname, because the scheme is not configurable anywhere: both
     /// <c>ConvertAndSend</c> and <c>MultipartFormRequest</c> build their target as the literal
     /// <c>"https://" + host + path</c>. Pointing <c>ServerEnvironmentService.GetHttpHost()</c> at
-    /// a loopback address would therefore demand TLS on localhost. Owning the whole request lets
-    /// the base URL carry its own scheme and port.
+    /// a loopback address would therefore demand TLS on localhost. Owning the whole request means
+    /// no address, scheme or port is involved at all.
     ///
     /// The contract with the game is <see cref="CompleteDelegate"/>: one call per request, with a
     /// status code the scheduler can act on, delivered on the Unity main thread. Status codes are
@@ -28,159 +27,49 @@ namespace SS2Revive
     /// </summary>
     internal static class BackendClient
     {
-        private const int RequestTimeoutMs = 8000;
-        private const int ProbeTimeoutMs = 1500;
+        /// <summary>A backend that threw answers with this, for the same reason dead endpoints do.</summary>
+        private const int BackendFailureStatus = 404;
 
-        /// <summary>Transport failures answer with this, for the same reason dead endpoints do.</summary>
-        private const int TransportFailureStatus = 404;
-
-        private static string _baseUrl;
         private static bool _available;
-        private static bool _local;
         private static int _nextRequestId = 0x4242_0000;
 
-        /// <summary>True when something will answer the routed endpoints - either the in-process
-        /// backend or a reachable remote one.</summary>
+        /// <summary>True when the in-process backend came up and will answer the routed endpoints.</summary>
         internal static bool Available => _available;
 
-        internal static string BaseUrl => _local ? "in-process" : _baseUrl;
+        internal static string BaseUrl => "in-process";
 
         internal static void Initialise(BackendMode mode)
         {
             _available = false;
-            _local = false;
-            _baseUrl = string.Empty;
 
-            switch (mode)
+            if (mode != BackendMode.Local)
             {
-                case BackendMode.Local:
-                    LocalBackendHost.Initialise();
-                    _local = LocalBackendHost.Available;
-                    _available = _local;
-                    if (!_local)
-                    {
-                        Plugin.Log.LogWarning("Local backend could not start; Bossa endpoints will "
-                                              + "fail fast instead.");
-                    }
-                    return;
-
-                case BackendMode.Remote:
-                    InitialiseRemote(Plugin.BackendBaseUrl.Value);
-                    return;
-
-                default:
-                    Plugin.Log.LogInfo("Backend mode is Off; every Bossa endpoint fails immediately.");
-                    return;
-            }
-        }
-
-        /// <summary>
-        /// Probes /health once, synchronously, before any game code can issue a request.
-        ///
-        /// Synchronous on purpose. The alternative is discovering the server is down one request
-        /// at a time, paying a connect timeout for each - during startup, serially, which is the
-        /// exact stall the fail-fast patch exists to remove. One bounded wait at load, and one
-        /// unambiguous line in the log, is the better trade.
-        /// </summary>
-        private static void InitialiseRemote(string baseUrl)
-        {
-            _baseUrl = (baseUrl ?? string.Empty).TrimEnd('/');
-
-            if (_baseUrl.Length == 0)
-            {
-                Plugin.Log.LogWarning("Backend base URL is empty; staying on fail-fast.");
+                Plugin.Log.LogInfo("Backend mode is Off; every Bossa endpoint fails immediately. "
+                                   + "Progression, daily challenges and cosmetics will not work.");
                 return;
             }
 
-            if (!_baseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
-                && !_baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            LocalBackendHost.Initialise();
+            _available = LocalBackendHost.Available;
+
+            if (!_available)
             {
-                Plugin.Log.LogWarning("Backend base URL '" + _baseUrl
-                                      + "' has no scheme; staying on fail-fast.");
-                return;
+                Plugin.Log.LogWarning("Local backend could not start; Bossa endpoints will "
+                                      + "fail fast instead.");
             }
-
-            if (Plugin.BackendAcceptAnyCertificate.Value
-                && _baseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            {
-                AcceptOurCertificateOnly();
-            }
-
-            try
-            {
-                var request = (HttpWebRequest)WebRequest.Create(_baseUrl + "/health");
-                request.Method = "GET";
-                request.Timeout = ProbeTimeoutMs;
-                request.ReadWriteTimeout = ProbeTimeoutMs;
-
-                using (var response = (HttpWebResponse)request.GetResponse())
-                {
-                    _available = (int)response.StatusCode == 200;
-                }
-            }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogWarning("Backend at " + _baseUrl + " did not answer /health ("
-                                      + ex.Message + "). Bossa endpoints will fail fast instead.");
-                return;
-            }
-
-            Plugin.Log.LogInfo(_available
-                ? "Backend at " + _baseUrl + " is up; routing Bossa HTTP calls to it."
-                : "Backend at " + _baseUrl + " answered /health with a non-200; staying on fail-fast.");
-        }
-
-        /// <summary>
-        /// Trusts exactly the host we were configured to talk to, and only when the user asked
-        /// for it. A blanket <c>return true</c> callback would also disable validation for every
-        /// other TLS connection the process makes, Steam's included.
-        /// </summary>
-        private static void AcceptOurCertificateOnly()
-        {
-            string expectedHost;
-            try
-            {
-                expectedHost = new Uri(_baseUrl).Host;
-            }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogWarning("Could not parse backend host for certificate pinning: " + ex.Message);
-                return;
-            }
-
-            var previous = ServicePointManager.ServerCertificateValidationCallback;
-            ServicePointManager.ServerCertificateValidationCallback =
-                (sender, certificate, chain, errors) =>
-                {
-                    if (errors == SslPolicyErrors.None)
-                        return true;
-
-                    var request = sender as HttpWebRequest;
-                    if (request != null
-                        && string.Equals(request.RequestUri.Host, expectedHost,
-                                         StringComparison.OrdinalIgnoreCase))
-                    {
-                        return true;
-                    }
-
-                    return previous != null && previous(sender, certificate, chain, errors);
-                };
-
-            Plugin.Log.LogWarning("Accepting any TLS certificate presented by " + expectedHost
-                                  + ". Only do this for a backend you host yourself.");
         }
 
         /// <summary>
         /// Rebuilds one of the eight <c>Request</c> overloads from its loose arguments and either
-        /// sends it, answers it here, or declines it. Arguments are matched by parameter name
-        /// rather than position - the overloads differ in both the path type (string or
-        /// StringBuilder) and the body type (none, byte[], char[] or StringBuilder), so position
-        /// is not stable across them.
+        /// answers it from the backend, answers it with a canned body, or declines it. Arguments
+        /// are matched by parameter name rather than position - the overloads differ in both the
+        /// path type (string or StringBuilder) and the body type (none, byte[], char[] or
+        /// StringBuilder), so position is not stable across them.
         ///
         /// Returning false means "not handled": the caller falls back to the fail-fast path.
-        /// <see cref="BackendRoutes"/> decides which requests are worth a round trip, so this runs
-        /// even when the backend is unavailable - a dead endpoint should not reach the network
-        /// whether or not there is a server listening.
+        /// <see cref="BackendRoutes"/> decides which requests the backend has an answer for, so
+        /// this runs even when the backend is unavailable - a dead endpoint should not reach the
+        /// network whether or not anything is going to answer it.
         /// </summary>
         internal static bool TrySend(MethodBase original, object[] args, out int requestId)
         {
@@ -209,32 +98,28 @@ namespace SS2Revive
 
             if (disposition == BackendRoutes.Disposition.AnswerLocally)
             {
-                requestId = ++_nextRequestId;
+                requestId = NextRequestId();
                 Complete(requestId, 200, localBody, onComplete);
                 return true;
             }
 
-            // Only the forwarding path needs the body, and an unreadable body has to fall through
-            // to fail-fast rather than silently sending an empty request.
+            // Only the backend path needs the body, and an unreadable body has to fall through to
+            // fail-fast rather than silently handing over an empty request.
             string body;
             if (!TryGetBody(byName, out body))
                 return false;
 
-            requestId = ++_nextRequestId;
-
-            if (_local)
-            {
-                SendLocal(requestId, verb, path, body, onComplete);
-                return true;
-            }
-
-            var token = Get<string>(byName, "serverAuthenticationToken");
-            var gameName = Get<string>(byName, "gameName");
-            var playerId = byName.ContainsKey("playerId") ? byName["playerId"] : null;
-
-            Send(requestId, verb, path, token, playerId, gameName, body, onComplete);
+            requestId = NextRequestId();
+            SendLocal(requestId, verb, path, body, onComplete);
             return true;
         }
+
+        /// <summary>
+        /// Interlocked because the game issues requests from more than one thread and a torn
+        /// increment would hand two in-flight requests the same id - which the scheduler matches
+        /// responses on, so one of them would be completed twice and the other never.
+        /// </summary>
+        private static int NextRequestId() => Interlocked.Increment(ref _nextRequestId);
 
         /// <summary>
         /// Answers in this process, but still on a worker thread and still a frame later.
@@ -250,7 +135,7 @@ namespace SS2Revive
         private static void SendLocal(int requestId, string verb, string path, string body,
                                       CompleteDelegate onComplete)
         {
-            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            ThreadPool.QueueUserWorkItem(_ =>
             {
                 LocalResponse response;
                 try
@@ -260,17 +145,11 @@ namespace SS2Revive
                 catch (Exception ex)
                 {
                     Plugin.Log.LogError("Local backend " + verb + " " + path + " threw: " + ex);
-                    response = new LocalResponse { Status = TransportFailureStatus, Body = null };
+                    response = new LocalResponse { Status = BackendFailureStatus, Body = null };
                 }
 
                 Complete(requestId, response.Status, response.Body, onComplete);
             });
-        }
-
-        private static T Get<T>(Dictionary<string, object> byName, string key) where T : class
-        {
-            object value;
-            return byName.TryGetValue(key, out value) ? value as T : null;
         }
 
         private static bool TryGetPath(Dictionary<string, object> byName, out string path)
@@ -284,13 +163,20 @@ namespace SS2Revive
             return path.Length > 0;
         }
 
+        /// <summary>
+        /// The argument arrives boxed, so this is an unboxing cast rather than a conversion, and
+        /// an unboxing cast of anything that is not exactly a <c>Services.HttpMethod</c> throws.
+        /// Every overload passes one today; the guard is here because this runs inside a Harmony
+        /// prefix over the game's entire HTTP surface, where an exception is not a failed request
+        /// but a failed frame.
+        /// </summary>
         private static string VerbFor(Dictionary<string, object> byName)
         {
             object value;
-            if (!byName.TryGetValue("method", out value) || value == null)
+            if (!byName.TryGetValue("method", out value) || !(value is Services.HttpMethod method))
                 return "GET";
 
-            switch ((Services.HttpMethod)value)
+            switch (method)
             {
                 case Services.HttpMethod.Post: return "POST";
                 case Services.HttpMethod.Put: return "PUT";
@@ -361,90 +247,6 @@ namespace SS2Revive
             catch
             {
                 return fallback;
-            }
-        }
-
-        private static void Send(int requestId, string verb, string path, string token,
-                                 object playerId, string gameName, string body,
-                                 CompleteDelegate onComplete)
-        {
-            var url = _baseUrl + path;
-
-            // A worker thread, because HttpWebRequest here is synchronous and the caller is the
-            // Unity main thread. The completion is marshalled back through Dispatcher - the game
-            // reads the response with pooled, main-thread-only JSON machinery.
-            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-            {
-                var status = TransportFailureStatus;
-                string responseBody = null;
-
-                try
-                {
-                    var request = (HttpWebRequest)WebRequest.Create(url);
-                    request.Method = verb;
-                    request.Timeout = RequestTimeoutMs;
-                    request.ReadWriteTimeout = RequestTimeoutMs;
-                    request.KeepAlive = true;
-                    request.UserAgent = "SS2Revive/" + Plugin.PluginVersion;
-
-                    if (!string.IsNullOrEmpty(token))
-                        request.Headers["Security"] = token;
-                    if (playerId != null)
-                        request.Headers["playerId"] = playerId.ToString();
-                    if (!string.IsNullOrEmpty(gameName))
-                        request.Headers["gameName"] = gameName;
-
-                    if (body != null)
-                    {
-                        var payload = Encoding.UTF8.GetBytes(body);
-                        request.ContentType = "application/json";
-                        request.ContentLength = payload.Length;
-                        using (var stream = request.GetRequestStream())
-                            stream.Write(payload, 0, payload.Length);
-                    }
-
-                    using (var response = (HttpWebResponse)request.GetResponse())
-                        ReadResponse(response, out status, out responseBody);
-                }
-                catch (WebException ex)
-                {
-                    // A 4xx arrives as an exception. That is a real answer from the server and
-                    // has to reach the caller as one - the request scheduler treats 4xx as a
-                    // terminal failure and releases its resource locks, which is what we want.
-                    var http = ex.Response as HttpWebResponse;
-                    if (http != null)
-                    {
-                        using (http)
-                            ReadResponse(http, out status, out responseBody);
-                    }
-                    else
-                    {
-                        Plugin.Log.LogWarning("Backend " + verb + " " + path + " failed: " + ex.Message);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Plugin.Log.LogError("Backend " + verb + " " + path + " threw: " + ex);
-                }
-
-                Complete(requestId, status, responseBody, onComplete);
-            });
-        }
-
-        private static void ReadResponse(HttpWebResponse response, out int status, out string body)
-        {
-            status = (int)response.StatusCode;
-
-            using (var stream = response.GetResponseStream())
-            {
-                if (stream == null)
-                {
-                    body = null;
-                    return;
-                }
-
-                using (var reader = new System.IO.StreamReader(stream, Encoding.UTF8))
-                    body = reader.ReadToEnd();
             }
         }
 

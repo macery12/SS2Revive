@@ -8,9 +8,27 @@ namespace SS2ReviveData
         public string CampaignId;
         public string CampaignLevelSequenceId;
         public string Grade;
-        public double BestTime;
-        public double BestBloodLoss;
         public long CreatedAt;
+
+        /// <summary>
+        /// Positive infinity means "never learned", not zero.
+        ///
+        /// This distinction is the whole point. Both of these are best-of-lowest values, so a
+        /// figure the client never sent has to lose every comparison it takes part in - and zero
+        /// wins all of them. Storing an absent time as 0 would take the first completion that
+        /// arrived without an <c>information</c> body and pin the level's best time at zero
+        /// forever: no later real time could beat it, and the mirror would then report a
+        /// zero-second run back to a client whose merge rule is "take the server's if it is
+        /// lower". Infinity loses instead, which is what "unknown" is supposed to do.
+        ///
+        /// <see cref="CampaignMirror.ToResponse"/> and <see cref="CampaignMirror.ToStorage"/> omit
+        /// these keys entirely while they are infinite, so an unknown value is never asserted as a
+        /// number anywhere it could be read back as one.
+        /// </summary>
+        public double BestTime = double.PositiveInfinity;
+
+        /// <summary>See <see cref="BestTime"/>.</summary>
+        public double BestBloodLoss = double.PositiveInfinity;
     }
 
     /// <summary>
@@ -89,6 +107,9 @@ namespace SS2ReviveData
                 if (parsed["bestBloodLoss"] != null) incomingBlood = parsed["bestBloodLoss"].AsDouble(double.PositiveInfinity);
             }
 
+            // Carried as-is, infinities included. A first completion whose body omitted one of
+            // these must leave that field unknown rather than pinning it at zero - see
+            // CampaignScore.BestTime.
             if (!_scores.TryGetValue(key, out var existing))
             {
                 _scores[key] = new CampaignScore
@@ -96,8 +117,8 @@ namespace SS2ReviveData
                     CampaignId = campaignId,
                     CampaignLevelSequenceId = campaignLevelSequenceId,
                     Grade = normalised,
-                    BestTime = Finite(incomingTime, 0),
-                    BestBloodLoss = Finite(incomingBlood, 0),
+                    BestTime = incomingTime,
+                    BestBloodLoss = incomingBlood,
                     CreatedAt = nowMs,
                 };
                 return;
@@ -113,8 +134,16 @@ namespace SS2ReviveData
             if (incomingBlood < existing.BestBloodLoss) existing.BestBloodLoss = incomingBlood;
         }
 
-        private static double Finite(double value, double fallback) =>
-            double.IsNaN(value) || double.IsInfinity(value) ? fallback : value;
+        /// <summary>True for a figure the client actually reported, as opposed to one this mirror
+        /// has never been told and must not invent.</summary>
+        private static bool IsKnown(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
+
+        /// <summary>Adds <paramref name="key"/> only when the value is one we were really given.
+        /// An absent key is the honest way to say "no record"; any number would be a claim.</summary>
+        private static void AddIfKnown(Json target, string key, double value)
+        {
+            if (IsKnown(value)) target.Add(key, value);
+        }
 
         /// <summary>
         /// Shapes the mirror for <c>GetPlayerCampaignInfo</c>.
@@ -132,9 +161,9 @@ namespace SS2ReviveData
             var scores = Json.Array();
             foreach (var score in _scores.Values)
             {
-                var information = Json.Object()
-                    .Add("bestTime", Finite(score.BestTime, 0))
-                    .Add("bestBloodLoss", Finite(score.BestBloodLoss, 0));
+                var information = Json.Object();
+                AddIfKnown(information, "bestTime", score.BestTime);
+                AddIfKnown(information, "bestBloodLoss", score.BestBloodLoss);
 
                 scores.Add(Json.Object()
                     .Add("campaignId", score.CampaignId)
@@ -155,13 +184,18 @@ namespace SS2ReviveData
             var scores = Json.Array();
             foreach (var score in _scores.Values)
             {
-                scores.Add(Json.Object()
+                var stored = Json.Object()
                     .Add("campaignId", score.CampaignId)
                     .Add("campaignLevelSequenceId", score.CampaignLevelSequenceId)
                     .Add("grade", score.Grade)
-                    .Add("bestTime", Finite(score.BestTime, 0))
-                    .Add("bestBloodLoss", Finite(score.BestBloodLoss, 0))
-                    .Add("createdAt", score.CreatedAt));
+                    .Add("createdAt", score.CreatedAt);
+
+                // Omitted rather than flattened, so a value we never learned is still unknown
+                // after a restart instead of coming back as a zero that wins every comparison.
+                AddIfKnown(stored, "bestTime", score.BestTime);
+                AddIfKnown(stored, "bestBloodLoss", score.BestBloodLoss);
+
+                scores.Add(stored);
             }
 
             return Json.Object().Add("scores", scores);
@@ -180,8 +214,11 @@ namespace SS2ReviveData
                     CampaignId = entry["campaignId"].AsStringOr(string.Empty),
                     CampaignLevelSequenceId = entry["campaignLevelSequenceId"].AsStringOr(string.Empty),
                     Grade = NormaliseGrade(entry["grade"].AsStringOr("FAIL")),
-                    BestTime = entry["bestTime"].AsDoubleOr(0),
-                    BestBloodLoss = entry["bestBloodLoss"].AsDoubleOr(0),
+
+                    // Absent means unknown, which is what an older save file that never carried
+                    // these keys - or a newer one that deliberately omits them - has to read as.
+                    BestTime = entry["bestTime"].AsDoubleOr(double.PositiveInfinity),
+                    BestBloodLoss = entry["bestBloodLoss"].AsDoubleOr(double.PositiveInfinity),
                     CreatedAt = entry["createdAt"].AsLongOr(0),
                 };
                 mirror._scores[score.CampaignId + " " + score.CampaignLevelSequenceId] = score;

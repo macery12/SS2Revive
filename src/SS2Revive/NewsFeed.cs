@@ -61,6 +61,8 @@ namespace SS2Revive
 }
 ";
 
+        /// <summary>Where the tiles are read from, once <see cref="Initialise"/> has settled it.
+        /// The patch reads this rather than keeping its own copy.</summary>
         internal static string BaseUrl { get; private set; }
 
         /// <summary>

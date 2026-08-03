@@ -7,9 +7,10 @@ namespace SS2Revive
     /// Decides, before any socket is opened, what should happen to one of Bossa's HTTP requests.
     ///
     /// Most of the endpoints the game calls have no replacement and never will - friends, UGC,
-    /// moderation, Twitch integration, rich presence. Forwarding those to the backend only to be
-    /// told 404 costs a round trip and a log line each, and the game re-issues several of them on
-    /// every menu transition. Anything not on this table is answered inside the process instead.
+    /// moderation, Twitch integration, rich presence. Handing those to the backend only to be told
+    /// 404 costs a thread hop and a log line each, and the game re-issues several of them on every
+    /// menu transition. Anything not on this table is refused here instead, without the backend
+    /// ever seeing it.
     ///
     /// Two endpoints get a canned local answer rather than a failure, because failing them is not
     /// free. Their failure callbacks re-request immediately with no backoff, so a 404 becomes a
@@ -20,7 +21,7 @@ namespace SS2Revive
     {
         internal enum Disposition
         {
-            /// <summary>Send it to the replacement backend.</summary>
+            /// <summary>Hand it to the backend, which will answer it properly.</summary>
             Forward,
 
             /// <summary>Answer it here with a canned 200. Never touches the network.</summary>
@@ -32,7 +33,7 @@ namespace SS2Revive
 
         /// <summary>
         /// An empty but structurally valid campaign mirror, used only when the backend is
-        /// unreachable or disabled.
+        /// disabled or failed to start.
         ///
         /// CampaignPlayerProgressLoader.OnPlayerProgressHttpRequestFailed re-issues this request
         /// the instant it fails, with no delay and no attempt limit, so a 404 here is a hot loop
@@ -65,7 +66,6 @@ namespace SS2Revive
         /// </summary>
         private static readonly Route[] Routes =
         {
-            Forwarded("GET", "/health"),
             Forwarded("GET", "/version"),
             Forwarded("GET", "/status"),
             Forwarded("GET", "/scheduledTimes"),
@@ -78,7 +78,7 @@ namespace SS2Revive
             Forwarded("GET", "/player-progression/playerProgression/players/*/progression"),
             Forwarded("POST", "/player-progression/campaignLevels/*/players/*/completed"),
 
-            // Forwarded when the backend is up, canned when it is not. Never simply failed.
+            // Answered by the backend when it is up, canned when it is not. Never simply failed.
             Forwarded("GET", "/player-progression/players/*/campaigns", CampaignProgressBody),
 
             Local("GET", "/player-progression/players/*/favouriteLevels", EmptyArrayBody),

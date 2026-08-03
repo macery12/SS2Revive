@@ -1,132 +1,41 @@
+<#
+.SYNOPSIS
+    Installs Surgeon Simulator 2 build 1.3.7, BepInEx, and SS2 Revive.
+
+.DESCRIPTION
+    Steam serves 1.5.x, which SS2 Revive cannot work on - that build removed the netcode the mod
+    restores. This downloads 1.3.7 from Steam's depot for an account that owns the game, into a
+    self-contained folder that leaves your Steam copy alone.
+
+    DepotDownloader prompts for the password and Steam Guard code itself; nothing about your
+    credentials passes through this script.
+
+    The mod is fetched from the latest GitHub release. If there is not one yet, or GitHub cannot be
+    reached, the game and BepInEx are still installed and the script says what to do by hand.
+
+.PARAMETER SteamUsername
+    Steam login name. Prompted for when not given.
+
+.PARAMETER InstallDirectory
+    Where to install. Prompted for when not given.
+
+.PARAMETER NoPause
+    Do not wait for a keypress at the end. For unattended runs.
+
+.EXAMPLE
+    .\installCurrentVersion.ps1
+#>
 [CmdletBinding()]
 param(
     [string]$SteamUsername,
     [string]$InstallDirectory,
-    [string]$InstallerDirectory,
-    [switch]$RedownloadTool,
-    [switch]$NoFolderPicker
+    [switch]$NoPause
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$InstallerVersion = '3.1'
-
-# Resolve all folders only after parameters have been parsed. This intentionally
-# avoids using $PSScriptRoot inside the param block, which caused the old error.
-if ([string]::IsNullOrWhiteSpace($InstallerDirectory)) {
-    $scriptFile = $MyInvocation.MyCommand.Path
-
-    if (-not [string]::IsNullOrWhiteSpace($scriptFile)) {
-        $InstallerDirectory = Split-Path -Parent $scriptFile
-    }
-}
-
-if ([string]::IsNullOrWhiteSpace($InstallerDirectory)) {
-    $InstallerDirectory = (Get-Location).Path
-}
-
-$InstallerDirectory = [System.IO.Path]::GetFullPath($InstallerDirectory)
-
-$BuildFolderName = 'Surgeon Simulator 2 - 1.3.7'
-
-$DefaultInstallDirectory = [System.IO.Path]::Combine($InstallerDirectory, $BuildFolderName)
-
-function Read-InstallDirectory {
-    param([Parameter(Mandatory = $true)][string]$DefaultPath)
-
-    Write-Host "Press Enter to accept: $DefaultPath" -ForegroundColor DarkGray
-
-    $answer = Read-Host 'Install folder'
-
-    if ([string]::IsNullOrWhiteSpace($answer)) {
-        return $DefaultPath
-    }
-
-    # Explorer's "Copy as path" hands over a quoted string.
-    return $answer.Trim().Trim('"')
-}
-
-function Select-InstallDirectory {
-    param([Parameter(Mandatory = $true)][string]$DefaultPath)
-
-    Write-Host ''
-    Write-Host 'Where should Surgeon Simulator 2 1.3.7 be installed?' -ForegroundColor Cyan
-
-    if ($NoFolderPicker) {
-        return Read-InstallDirectory -DefaultPath $DefaultPath
-    }
-
-    # A folder picker needs a single-threaded apartment and a desktop to draw on.
-    # Neither is guaranteed, so every failure here falls back to typing a path
-    # rather than taking the installer down.
-    try {
-        if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
-            throw 'not running in a single-threaded apartment'
-        }
-
-        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
-    }
-    catch {
-        Write-Host "Folder picker unavailable ($($_.Exception.Message)), type a path instead." -ForegroundColor DarkGray
-        return Read-InstallDirectory -DefaultPath $DefaultPath
-    }
-
-    Write-Host 'Pick the folder to create the install in. Cancel to use the default.' -ForegroundColor DarkGray
-
-    $owner  = $null
-    $dialog = $null
-
-    try {
-        $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-        $dialog.Description         = "Choose where to create the '$BuildFolderName' folder."
-        $dialog.ShowNewFolderButton = $true
-
-        $startIn = Split-Path -Parent $DefaultPath
-        if ($startIn -and (Test-Path -LiteralPath $startIn)) {
-            $dialog.SelectedPath = $startIn
-        }
-
-        # Owned by a topmost window, otherwise the dialog can open behind the console
-        # and look like the installer has hung.
-        $owner = New-Object System.Windows.Forms.Form
-        $owner.TopMost       = $true
-        $owner.ShowInTaskbar = $false
-
-        $result = $dialog.ShowDialog($owner)
-
-        if ($result -ne [System.Windows.Forms.DialogResult]::OK -or
-            [string]::IsNullOrWhiteSpace($dialog.SelectedPath)) {
-            Write-Host "No folder chosen, using the default." -ForegroundColor DarkGray
-            return $DefaultPath
-        }
-
-        $chosen = $dialog.SelectedPath
-
-        # Picking the build folder itself is the obvious mistake to make here, and
-        # appending blindly would bury the game one level deeper than intended.
-        if ((Split-Path -Leaf $chosen) -eq $BuildFolderName) {
-            return $chosen
-        }
-
-        return [System.IO.Path]::Combine($chosen, $BuildFolderName)
-    }
-    catch {
-        Write-Host "Folder picker failed ($($_.Exception.Message)), type a path instead." -ForegroundColor DarkGray
-        return Read-InstallDirectory -DefaultPath $DefaultPath
-    }
-    finally {
-        if ($owner)  { $owner.Dispose() }
-        if ($dialog) { $dialog.Dispose() }
-    }
-}
-
-# -InstallDirectory still wins, so an unattended run never stops here.
-if ([string]::IsNullOrWhiteSpace($InstallDirectory)) {
-    $InstallDirectory = Select-InstallDirectory -DefaultPath $DefaultInstallDirectory
-}
-
-$InstallDirectory = [System.IO.Path]::GetFullPath($InstallDirectory)
+$InstallerVersion = '4.0'
 
 # Exact Surgeon Simulator 2 Steam depot build.
 $AppId    = '774791'
@@ -134,252 +43,239 @@ $DepotId  = '774793'
 $Manifest = '5729349529999704019'
 $GameExe  = 'Surgeon Simulator 2.exe'
 
-$ToolRoot = [System.IO.Path]::Combine($InstallerDirectory, '_tools', 'DepotDownloader')
-$ToolExe  = [System.IO.Path]::Combine($ToolRoot, 'DepotDownloader.exe')
+$BuildFolderName = 'Surgeon Simulator 2 - 1.3.7'
 
-# The x64 build, pinned. The 32-bit one installs without complaining and then loads
-# nothing at all, which is a miserable thing to debug.
+# The x64 build, pinned. The 32-bit one installs without complaining and then loads nothing at
+# all, which is a miserable thing to debug.
 $BepInExVersion = '5.4.23.2'
 $BepInExUrl     = "https://github.com/BepInEx/BepInEx/releases/download/v$BepInExVersion/BepInEx_win_x64_$BepInExVersion.zip"
+
+$ModRepo = 'macery12/SS2Revive'
+
+$UserAgent = @{ 'User-Agent' = "SS2Revive-Installer/$InstallerVersion" }
+
+$InstallerDirectory = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$ToolRoot = Join-Path $InstallerDirectory '_tools\DepotDownloader'
+$ToolExe  = Join-Path $ToolRoot 'DepotDownloader.exe'
+
+# ---------------------------------------------------------------------------- helpers
 
 function Write-Step {
     param([Parameter(Mandatory = $true)][string]$Message)
     Write-Host "`n==> $Message" -ForegroundColor Cyan
 }
 
-function Install-DepotDownloader {
-    if ($RedownloadTool -and (Test-Path -LiteralPath $ToolRoot)) {
-        Remove-Item -LiteralPath $ToolRoot -Recurse -Force
-    }
-
-    if (Test-Path -LiteralPath $ToolExe) {
-        return
-    }
-
-    Write-Step 'Downloading the latest official DepotDownloader release'
-    New-Item -ItemType Directory -Path $ToolRoot -Force | Out-Null
-
-    $headers = @{
-        'User-Agent' = 'SS2-1.3.7-Installer-V3'
-        'Accept'     = 'application/vnd.github+json'
-    }
-
-    $release = Invoke-RestMethod `
-        -Uri 'https://api.github.com/repos/SteamRE/DepotDownloader/releases/latest' `
-        -Headers $headers
-
-    $asset = $release.assets |
-        Where-Object {
-            $_.name -match '(?i)(windows|win)[-_.]?x64.*\.zip$' -or
-            $_.name -match '(?i)depotdownloader.*\.zip$'
-        } |
-        Select-Object -First 1
-
-    if (-not $asset) {
-        throw 'Could not locate a compatible DepotDownloader ZIP in the latest GitHub release.'
-    }
-
-    $zipPath = [System.IO.Path]::Combine($env:TEMP, $asset.name)
-
-    Invoke-WebRequest `
-        -Uri $asset.browser_download_url `
-        -OutFile $zipPath `
-        -Headers $headers
-
-    Expand-Archive -LiteralPath $zipPath -DestinationPath $ToolRoot -Force
-    Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
-
-    if (-not (Test-Path -LiteralPath $ToolExe)) {
-        $foundExe = Get-ChildItem -LiteralPath $ToolRoot -Filter 'DepotDownloader.exe' -Recurse -File |
-            Select-Object -First 1
-
-        if ($foundExe) {
-            Copy-Item -LiteralPath $foundExe.FullName -Destination $ToolExe -Force
-
-            # Copy adjacent runtime files when the executable was nested.
-            Get-ChildItem -LiteralPath $foundExe.Directory.FullName -File | ForEach-Object {
-                $destination = [System.IO.Path]::Combine($ToolRoot, $_.Name)
-                if (-not (Test-Path -LiteralPath $destination)) {
-                    Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
-                }
-            }
-        }
-    }
-
-    if (-not (Test-Path -LiteralPath $ToolExe)) {
-        throw "DepotDownloader.exe was not found after extracting '$($asset.name)'."
-    }
+function Wait-ForClose {
+    if ($NoPause) { return }
+    Write-Host ''
+    # Guarded: a redirected or closed stdin must not turn "finished" into a crash.
+    try { Read-Host 'Press Enter to close' | Out-Null } catch { }
 }
 
-function Write-SteamAppId {
-    param([Parameter(Mandatory = $true)][string]$GameFolder)
+<#
+    Downloads a zip and copies its payload into $Destination.
 
-    $appIdPath = [System.IO.Path]::Combine($GameFolder, 'steam_appid.txt')
+    All three things this script installs arrive the same way, and the only thing that differs is
+    a file that proves the extraction worked. $Marker is that file: it is looked for at the root
+    first, then anywhere below it, so a release that grew or lost a wrapper folder still installs
+    rather than silently copying nothing.
+#>
+function Install-RemoteZip {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][string]$Marker,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
 
-    # Written once and then left alone. Without it SteamAPI.Init() has no app id to
-    # resolve outside a Steam launch, fails, and the game stops at "Authentication
-    # Failed: Platform Authentication Error".
-    if (Test-Path -LiteralPath $appIdPath) {
-        Write-Host "steam_appid.txt already present, leaving it alone." -ForegroundColor DarkGray
-        return
-    }
+    $staging = Join-Path $env:TEMP ("ss2revive-" + [System.Guid]::NewGuid().ToString('N'))
+    $zip     = Join-Path $staging 'download.zip'
+    $extract = Join-Path $staging 'extracted'
 
-    Write-Step 'Writing steam_appid.txt'
-    [System.IO.File]::WriteAllText($appIdPath, $AppId)
-    Write-Host "Wrote $appIdPath ($AppId)" -ForegroundColor Green
-}
-
-function Install-BepInEx {
-    param([Parameter(Mandatory = $true)][string]$GameFolder)
-
-    Write-Step "Installing BepInEx $BepInExVersion (x64)"
-
-    $stagingRoot = [System.IO.Path]::Combine($env:TEMP, "ss2-bepinex-$([System.Guid]::NewGuid().ToString('N'))")
-    $zipPath     = [System.IO.Path]::Combine($stagingRoot, "BepInEx_win_x64_$BepInExVersion.zip")
-    $extractRoot = [System.IO.Path]::Combine($stagingRoot, 'extracted')
-
-    New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
     try {
-        Invoke-WebRequest -Uri $BepInExUrl -OutFile $zipPath -Headers @{
-            'User-Agent' = "SS2-1.3.7-Installer-V$InstallerVersion"
-        }
+        Invoke-WebRequest -Uri $Uri -OutFile $zip -Headers $UserAgent
+        Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
 
-        Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
-
-        # The zip has its payload at the root. Cope with a single wrapper folder anyway,
-        # so a repackaged release does not silently install nothing.
-        $payloadRoot = $extractRoot
-        if (-not (Test-Path -LiteralPath ([System.IO.Path]::Combine($payloadRoot, 'winhttp.dll')))) {
-            $nested = Get-ChildItem -LiteralPath $extractRoot -Filter 'winhttp.dll' -Recurse -File |
+        $payload = $extract
+        if (-not (Test-Path -LiteralPath (Join-Path $payload $Marker))) {
+            $found = Get-ChildItem -LiteralPath $extract -Filter $Marker -Recurse -File |
                 Select-Object -First 1
 
-            if (-not $nested) {
-                throw 'winhttp.dll was not found in the BepInEx archive.'
-            }
-
-            $payloadRoot = $nested.Directory.FullName
+            if (-not $found) { throw "$Marker was not found in the archive from $Uri" }
+            $payload = $found.Directory.FullName
         }
 
-        Get-ChildItem -LiteralPath $payloadRoot -Force | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination $GameFolder -Recurse -Force
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+        Get-ChildItem -LiteralPath $payload -Force | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $Destination -Recurse -Force
         }
     }
     finally {
-        Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
     }
-
-    $loaderPath = [System.IO.Path]::Combine($GameFolder, 'winhttp.dll')
-    if (-not (Test-Path -LiteralPath $loaderPath)) {
-        throw 'BepInEx extracted, but winhttp.dll is not next to the game executable.'
-    }
-
-    # BepInEx only creates this on its first run. Making it now means the mod can be
-    # dropped in before the game has ever been launched.
-    $pluginFolder = [System.IO.Path]::Combine($GameFolder, 'BepInEx', 'plugins', 'SS2Revive')
-    New-Item -ItemType Directory -Path $pluginFolder -Force | Out-Null
-
-    Write-Host "BepInEx $BepInExVersion installed into $GameFolder" -ForegroundColor Green
-
-    return $pluginFolder
 }
 
-try {
-    Write-Host "Surgeon Simulator 2 1.3.7 Installer V$InstallerVersion" -ForegroundColor Green
-    Write-Host "App: $AppId | Depot: $DepotId | Manifest: $Manifest"
-    Write-Host "Installer folder: $InstallerDirectory"
-    Write-Host "Install folder:   $InstallDirectory"
+<#
+    Finds the download URL of one asset on a repository's newest release.
 
-    Install-DepotDownloader
+    GitHub's releases/latest is the newest published release, and it skips drafts and
+    pre-releases - so this always lands on the current version without the version being named
+    anywhere in this script.
 
-    if ([string]::IsNullOrWhiteSpace($SteamUsername)) {
-        $SteamUsername = Read-Host 'Enter the Steam account login name that owns Surgeon Simulator 2'
+    $Prefer is not a nicety. DepotDownloader publishes one zip per platform and the first one
+    alphabetically is a Linux build, so "any zip" would install something that cannot run here.
+    $AllowAnyZip relaxes that for our own releases, which carry a single file.
+#>
+function Get-LatestReleaseZipUrl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [Parameter(Mandatory = $true)][string]$Prefer,
+        [switch]$AllowAnyZip
+    )
+
+    $headers = $UserAgent + @{ 'Accept' = 'application/vnd.github+json' }
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -Headers $headers
+
+    $zips = @(@($release.assets) | Where-Object { $_.name -like '*.zip' })
+    if ($zips.Count -eq 0) { throw "release $($release.tag_name) has no .zip attached" }
+
+    $asset = $zips | Where-Object { $_.name -like $Prefer } | Select-Object -First 1
+    if (-not $asset -and $AllowAnyZip) { $asset = $zips[0] }
+    if (-not $asset) {
+        throw "release $($release.tag_name) has no asset matching '$Prefer' (found: " +
+              (($zips | ForEach-Object { $_.name }) -join ', ') + ")"
     }
 
+    return [pscustomobject]@{
+        Tag  = $release.tag_name
+        Name = $asset.name
+        Url  = $asset.browser_download_url
+    }
+}
+
+# ---------------------------------------------------------------------------- install
+
+try {
+    Write-Host "SS2 Revive installer V$InstallerVersion" -ForegroundColor Green
+    Write-Host "Surgeon Simulator 2 build 1.3.7  (app $AppId, depot $DepotId)"
+
+    if ([string]::IsNullOrWhiteSpace($InstallDirectory)) {
+        $default = Join-Path $InstallerDirectory $BuildFolderName
+        Write-Host ''
+        Write-Host 'Where should the game be installed?' -ForegroundColor Cyan
+        Write-Host "Press Enter for: $default" -ForegroundColor DarkGray
+
+        $answer = Read-Host 'Install folder'
+
+        # Explorer's "Copy as path" hands over a quoted string.
+        $InstallDirectory = if ([string]::IsNullOrWhiteSpace($answer)) {
+            $default
+        }
+        else {
+            $answer.Trim().Trim('"')
+        }
+    }
+
+    $InstallDirectory = [System.IO.Path]::GetFullPath($InstallDirectory)
+    Write-Host "Installing to: $InstallDirectory"
+
+    if ([string]::IsNullOrWhiteSpace($SteamUsername)) {
+        $SteamUsername = Read-Host 'Steam login name of the account that owns Surgeon Simulator 2'
+    }
     if ([string]::IsNullOrWhiteSpace($SteamUsername)) {
         throw 'A Steam account login name is required.'
     }
 
+    if (-not (Test-Path -LiteralPath $ToolExe)) {
+        Write-Step 'Downloading DepotDownloader'
+        # The self-contained Windows x64 build, so there is no .NET runtime to install first.
+        $tool = Get-LatestReleaseZipUrl -Repo 'SteamRE/DepotDownloader' -Prefer '*windows-x64*'
+        Write-Host "$($tool.Name) from $($tool.Tag)" -ForegroundColor DarkGray
+        Install-RemoteZip -Uri $tool.Url -Marker 'DepotDownloader.exe' -Destination $ToolRoot
+    }
+
+    Write-Step 'Downloading Surgeon Simulator 2 1.3.7'
+    Write-Host 'DepotDownloader will ask for your Steam password and Steam Guard code.' -ForegroundColor Yellow
+    Write-Host 'They are handled by that tool and are not saved by this script.' -ForegroundColor Yellow
+
     New-Item -ItemType Directory -Path $InstallDirectory -Force | Out-Null
 
-    Write-Step "Downloading Surgeon Simulator 2 version 1.3.7"
-    Write-Host 'DepotDownloader may prompt for your Steam password and Steam Guard.' -ForegroundColor Yellow
-    Write-Host 'Your password is not saved in this installer script.' -ForegroundColor Yellow
+    & $ToolExe -app $AppId -depot $DepotId -manifest $Manifest `
+               -username $SteamUsername -remember-password `
+               -dir $InstallDirectory -validate
+    if ($LASTEXITCODE -ne 0) { throw "DepotDownloader exited with code $LASTEXITCODE." }
 
-    $downloadArguments = @(
-        '-app', $AppId,
-        '-depot', $DepotId,
-        '-manifest', $Manifest,
-        '-username', $SteamUsername,
-        '-remember-password',
-        '-dir', $InstallDirectory,
-        '-validate'
-    )
+    $exe = Get-ChildItem -LiteralPath $InstallDirectory -Filter $GameExe -Recurse -File |
+        Select-Object -First 1
+    if (-not $exe) { throw "The download finished, but '$GameExe' was not found." }
 
-    & $ToolExe @downloadArguments
-    $depotExitCode = $LASTEXITCODE
+    $gameFolder = $exe.Directory.FullName
 
-    if ($depotExitCode -ne 0) {
-        throw "DepotDownloader exited with code $depotExitCode."
+    # Without this, SteamAPI.Init has no app id to resolve outside a Steam launch, fails, and the
+    # game stops at "Authentication Failed: Platform Authentication Error". Written once.
+    $appIdFile = Join-Path $gameFolder 'steam_appid.txt'
+    if (-not (Test-Path -LiteralPath $appIdFile)) {
+        [System.IO.File]::WriteAllText($appIdFile, $AppId)
     }
 
-    $installedExe = [System.IO.Path]::Combine($InstallDirectory, $GameExe)
+    Write-Step "Installing BepInEx $BepInExVersion (x64)"
+    Install-RemoteZip -Uri $BepInExUrl -Marker 'winhttp.dll' -Destination $gameFolder
 
-    if (-not (Test-Path -LiteralPath $installedExe)) {
-        $foundGameExe = Get-ChildItem -LiteralPath $InstallDirectory -Filter $GameExe -Recurse -File |
-            Select-Object -First 1
+    $pluginFolder = Join-Path $gameFolder 'BepInEx\plugins\SS2Revive'
 
-        if ($foundGameExe) {
-            $installedExe = $foundGameExe.FullName
-        }
-        else {
-            throw "The depot download completed, but '$GameExe' was not found."
-        }
+    Write-Step 'Installing SS2 Revive'
+    $modInstalled = $false
+    try {
+        # Whatever the newest release carries. The zip is named for its version, so the pattern
+        # matches the shape rather than a number this script would otherwise have to be kept in
+        # step with; -AllowAnyZip covers a release that named it something else entirely.
+        $mod = Get-LatestReleaseZipUrl -Repo $ModRepo -Prefer 'SS2Revive-*.zip' -AllowAnyZip
+        Install-RemoteZip -Uri $mod.Url -Marker 'SS2Revive.dll' -Destination $pluginFolder
+        $modInstalled = $true
+        Write-Host "Installed SS2 Revive $($mod.Tag) ($($mod.Name))." -ForegroundColor Green
+    }
+    catch {
+        # Not fatal. A playable 1.3.7 with BepInEx on it is most of the work, and the mod is three
+        # files the player can drop in themselves once a release exists.
+        New-Item -ItemType Directory -Path $pluginFolder -Force | Out-Null
+        Write-Host "Could not fetch a release from github.com/$ModRepo" -ForegroundColor Yellow
+        Write-Host "  $($_.Exception.Message)" -ForegroundColor DarkGray
+        Write-Host 'The game and BepInEx are installed; only the mod is missing.' -ForegroundColor Yellow
     }
 
-    $gameFolder = Split-Path -Parent $installedExe
-
-    Write-SteamAppId -GameFolder $gameFolder
-    $pluginFolder = Install-BepInEx -GameFolder $gameFolder
-
-    $launcherPath = [System.IO.Path]::Combine($InstallDirectory, 'Launch Surgeon Simulator 2 - 1.3.7.cmd')
-
-    $launcherLines = @(
+    $launcher = Join-Path $InstallDirectory 'Launch Surgeon Simulator 2 - 1.3.7.cmd'
+    @(
         '@echo off',
         'cd /d "' + $gameFolder + '"',
-        'start "" "' + $installedExe + '"'
-    )
-    $launcherLines | Set-Content -LiteralPath $launcherPath -Encoding ASCII
+        'start "" "' + $exe.FullName + '"'
+    ) | Set-Content -LiteralPath $launcher -Encoding ASCII
 
-    $versionPath = [System.IO.Path]::Combine($InstallDirectory, 'BuildVersion.txt')
-    $versionText = if (Test-Path -LiteralPath $versionPath) {
-        (Get-Content -LiteralPath $versionPath -Raw).Trim()
+    Write-Step 'Done'
+    Write-Host "Game:     $gameFolder" -ForegroundColor Green
+    Write-Host "Launcher: $launcher" -ForegroundColor Green
+
+    if ($modInstalled) {
+        Write-Host ''
+        Write-Host 'Run the launcher to play. Steam must be running and signed in.' -ForegroundColor Cyan
+        Write-Host 'To check the mod loaded, open BepInEx\LogOutput.log and look for' -ForegroundColor Cyan
+        Write-Host '[Info   :SS2 Revive].' -ForegroundColor Cyan
     }
     else {
-        'BuildVersion.txt was not present'
+        Write-Host ''
+        Write-Host 'To finish, put SS2Revive.dll, SS2Revive_Data.dll and the newsfeed folder in:' -ForegroundColor Cyan
+        Write-Host "  $pluginFolder" -ForegroundColor White
+        Write-Host 'Both DLLs must sit side by side in that one folder.' -ForegroundColor Cyan
     }
 
-    Write-Step 'Installation complete'
-    Write-Host "Installed folder: $InstallDirectory" -ForegroundColor Green
-    Write-Host "Game executable:  $installedExe" -ForegroundColor Green
-    Write-Host "Reported build:   $versionText" -ForegroundColor Green
-    Write-Host "Launcher:         $launcherPath" -ForegroundColor Green
     Write-Host ''
-    Write-Host "The game and BepInEx $BepInExVersion are both installed. The mod is not." -ForegroundColor Cyan
-    Write-Host ''
-    Write-Host 'To finish, put SS2Revive.dll, SS2Revive_Data.dll and the newsfeed folder in:' -ForegroundColor Cyan
-    Write-Host "  $pluginFolder" -ForegroundColor White
-    Write-Host ''
-    Write-Host 'Both DLLs must sit side by side in that one folder. Then run the launcher above.' -ForegroundColor Cyan
-    Write-Host 'To check it loaded, open BepInEx\LogOutput.log and look for [Info   :SS2 Revive].' -ForegroundColor Cyan
-    Write-Host ''
-    Write-Host 'Steam must be running and signed in. Keep this folder separate from the' -ForegroundColor Yellow
-    Write-Host 'normal Steam installation.' -ForegroundColor Yellow
+    Write-Host 'This install is separate from Steam. Steam still has 1.5.x and will not' -ForegroundColor Yellow
+    Write-Host 'touch or update this copy.' -ForegroundColor Yellow
+
+    Wait-ForClose
 }
 catch {
     Write-Host "`nINSTALL FAILED: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host ''
-    Write-Host "The first line should say: Surgeon Simulator 2 1.3.7 Installer V$InstallerVersion" -ForegroundColor Yellow
-    Write-Host 'If it does not, Windows is still launching an older installer file.' -ForegroundColor Yellow
+    Wait-ForClose
     exit 1
 }

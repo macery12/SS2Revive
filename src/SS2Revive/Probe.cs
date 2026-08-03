@@ -95,9 +95,7 @@ namespace SS2Revive
                 : PartyBackend.IsOwner ? "owner (leader)" : "member (joined)");
 
             Line(sb, "Backend", () => Plugin.Backend.Value + (BackendClient.Available
-                ? " - " + (LocalBackendHost.Available
-                    ? LocalBackendHost.Backend.Describe()
-                    : BackendClient.BaseUrl)
+                ? " - " + LocalBackendHost.Backend.Describe()
                 : " - nothing answering; endpoints fail fast"));
 
             // Whether a party member's level came through tells us which half of the peer exchange
@@ -120,6 +118,19 @@ namespace SS2Revive
             if (shell == null)
             {
                 sb.AppendLine("  Shell.Instance is null - too early, or startup aborted.");
+                sb.AppendLine("=========================================================");
+                Plugin.Log.LogInfo(sb.ToString());
+                return;
+            }
+
+            // Everything above is identity, party and transport - the answers to "why did my
+            // invite do nothing", which is most of what a bug report needs. Below is live session
+            // and patient state, which is long, only means anything mid-level, and is worth being
+            // able to turn off for a player who is reading their own log rather than filing one.
+            if (!Plugin.VerboseProbe.Value)
+            {
+                sb.AppendLine("  (session and patient state omitted; set Diagnostics.Verbose = true"
+                              + " in the config to include it)");
                 sb.AppendLine("=========================================================");
                 Plugin.Log.LogInfo(sb.ToString());
                 return;

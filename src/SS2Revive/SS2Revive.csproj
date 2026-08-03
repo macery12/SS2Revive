@@ -9,7 +9,8 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
-    <Version>0.2.0</Version>
+    <!-- Set once in Directory.Build.props at the repository root. -->
+    <Version>$(SS2ReviveVersion)</Version>
     <DebugType>portable</DebugType>
     <!-- The game ships assemblies that reference types we do not resolve; do not fail on that. -->
     <NoWarn>$(NoWarn);CS0436;MSB3277</NoWarn>
@@ -22,6 +23,38 @@
   <Target Name="CheckGameDir" BeforeTargets="ResolveAssemblyReferences">
     <Error Condition="'$(GameManagedDir)' == '' or !Exists('$(GameManagedDir)\Assembly-CSharp.dll')"
            Text="Could not find your Surgeon Simulator 2 install. Looked for Assembly-CSharp.dll under '$(GameManagedDir)'. Either build with -p:GameDir=&quot;full\path\to\Surgeon Simulator 2&quot;, or copy Directory.Build.user.props.example to Directory.Build.user.props and set GameDir there." />
+  </Target>
+
+  <!--
+    [BepInPlugin] takes the version as an attribute argument, so it has to be a compile-time
+    constant and cannot read the assembly's own metadata. Generating that constant from
+    SS2ReviveVersion is what keeps the version the loader prints in step with the version in
+    the assembly, rather than being a second copy someone has to remember to bump.
+
+    The file lands in obj\, so no generated source is committed.
+  -->
+  <Target Name="GenerateVersionConstant" BeforeTargets="BeforeCompile">
+    <PropertyGroup>
+      <VersionConstantFile>$(IntermediateOutputPath)GeneratedVersion.cs</VersionConstantFile>
+    </PropertyGroup>
+    <ItemGroup>
+      <VersionConstantLines Include="// Generated from SS2ReviveVersion by SS2Revive.csproj. Do not edit." />
+      <VersionConstantLines Include="namespace SS2Revive" />
+      <VersionConstantLines Include="{" />
+      <VersionConstantLines Include="    internal static class GeneratedVersion" />
+      <VersionConstantLines Include="    {" />
+      <VersionConstantLines Include="        internal const string Value = &quot;$(SS2ReviveVersion)&quot;%3B" />
+      <VersionConstantLines Include="    }" />
+      <VersionConstantLines Include="}" />
+    </ItemGroup>
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <WriteLinesToFile File="$(VersionConstantFile)"
+                      Lines="@(VersionConstantLines)"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <Compile Include="$(VersionConstantFile)" />
+    </ItemGroup>
   </Target>
 
   <ItemGroup>

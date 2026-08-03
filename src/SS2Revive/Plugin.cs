@@ -14,12 +14,17 @@ namespace SS2Revive
     /// per-player almost throughout - daily challenges are seeded from the player id and the date,
     /// campaign progress mirrors a local save, and the cosmetics catalogue ships inside the game -
     /// so there is very little a shared server was actually required for.
+    ///
+    /// There is deliberately no remote option. An earlier build could forward these calls to a
+    /// self-hosted replacement server, and nothing was ever gained by it: every endpoint is
+    /// per-player, so the hosted answer was identical to the local one, and a second machine in
+    /// the path only added a port to secure, a process to keep running, and a class of failure
+    /// (unreachable host, wrong shared token, expired certificate) that Local cannot have.
     /// </summary>
     internal enum BackendMode
     {
         Off,
         Local,
-        Remote,
     }
 
     /// <summary>
@@ -32,7 +37,21 @@ namespace SS2Revive
     {
         public const string PluginGuid = "dev.ss2revive.core";
         public const string PluginName = "SS2 Revive";
-        public const string PluginVersion = "0.2.0";
+
+        /// <summary>Generated from SS2ReviveVersion in Directory.Build.props at build time, so
+        /// this and the assembly version cannot disagree. See SS2Revive.csproj.</summary>
+        public const string PluginVersion = GeneratedVersion.Value;
+
+        /// <summary>
+        /// The build every patch in here was derived from, and the last one that can work.
+        ///
+        /// 1.5.0 is the offline patch: it removed the netcode this mod restores, so there is
+        /// nothing left for the party, transport or backend patches to attach to. Saying so at
+        /// load is worth a great deal, because the failure otherwise looks like a mod that
+        /// silently does nothing - the log fills with patch failures that mean nothing to a
+        /// player, and the game itself runs fine.
+        /// </summary>
+        private const string TestedGameVersion = "1.3.7";
 
         internal static Plugin Instance { get; private set; }
         internal static ManualLogSource Log { get; private set; }
@@ -49,9 +68,6 @@ namespace SS2Revive
         internal static ConfigEntry<BackendMode> Backend;
         internal static ConfigEntry<bool> GrantAllCosmetics;
         internal static ConfigEntry<string> SaveDirectory;
-        internal static ConfigEntry<string> BackendBaseUrl;
-        internal static ConfigEntry<string> BackendSharedToken;
-        internal static ConfigEntry<bool> BackendAcceptAnyCertificate;
         internal static ConfigEntry<bool> NewsFeedEnabled;
         internal static ConfigEntry<string> NewsFeedUrl;
         internal static ConfigEntry<bool> SteamTransport;
@@ -98,10 +114,11 @@ namespace SS2Revive
                 + "shared level browser left to publish to.");
             Backend = Config.Bind("Backend", "Mode", BackendMode.Local,
                 "Where Bossa's dead HTTP calls are answered.\n"
-                + "Local  - inside this DLL. No server, no port, nothing to maintain. Saves go to "
+                + "Local - inside this DLL. No server, no port, nothing to maintain. Saves go to "
                 + "%LOCALAPPDATA%\\Bossa Studios\\Surgeon Simulator 2\\SS2Revive.\n"
-                + "Remote - forwarded to a self-hosted backend at BaseUrl, probed once at startup.\n"
-                + "Off    - every call fails immediately, as it did before any backend existed.");
+                + "Off   - every call fails immediately, as it did before any backend existed. "
+                + "Progression, challenges and cosmetics stop working; this is a diagnostic "
+                + "setting, not a supported way to play.");
             GrantAllCosmetics = Config.Bind("Backend", "GrantAllCosmetics", true,
                 "Report every catalogued item as owned. On by default because a partial inventory "
                 + "is not a smaller answer, it is a destructive one: the client deletes any unlock "
@@ -113,18 +130,6 @@ namespace SS2Revive
                 + "%LOCALAPPDATA%\\Bossa Studios\\Surgeon Simulator 2\\SS2Revive. Do not point "
                 + "this inside the game folder or BepInEx - a Steam file verification or a mod "
                 + "update would delete it.");
-            BackendBaseUrl = Config.Bind("Backend", "BaseUrl", "http://127.0.0.1:8050",
-                "Remote mode only. Scheme, host and port of the replacement backend. Plain http is "
-                + "fine on loopback or a LAN address; use https only when something in front of it "
-                + "terminates TLS.");
-            BackendSharedToken = Config.Bind("Backend", "SharedToken", "ss2revive-local",
-                "Sent in the game's 'Security' header on every backend call. Must match "
-                + "SHARED_TOKEN on the server. The default is only safe for a backend bound to "
-                + "127.0.0.1 - anyone who can reach the port and knows this value can read and "
-                + "write any player's records.");
-            BackendAcceptAnyCertificate = Config.Bind("Backend", "AcceptAnyCertificate", false,
-                "Remote mode only. Accept an untrusted TLS certificate, but only from the host in "
-                + "BaseUrl. Needed for a self-signed certificate; unnecessary with a real one.");
 
             NewsFeedEnabled = Config.Bind("NewsFeed", "Enabled", true,
                 "Fill the three blank panels on the main menu. Bossa's feed host is gone, so "
@@ -144,12 +149,16 @@ namespace SS2Revive
                 + "number instead of nothing. This is the only thing left that genuinely crosses "
                 + "between players - everything else is per-player and answered locally.");
             VerboseProbe = Config.Bind("Diagnostics", "Verbose", true,
-                "Log network/session state on the probe key.");
+                "Include live session and patient state in the probe dump, on top of the identity, "
+                + "party and transport summary that is always printed. Leave this on when you are "
+                + "going to attach the log to a bug report.");
             ProbeKey = Config.Bind("Diagnostics", "ProbeKey", KeyCode.F9,
                 "Press to dump live networking state to the log.");
 
             Log.LogInfo($"{PluginName} {PluginVersion} starting.");
             Log.LogInfo($"Unity {Application.unityVersion} | product '{Application.productName}' | version '{Application.version}'");
+
+            WarnAboutGameVersion(Application.version);
 
             _harmony = new Harmony(PluginGuid);
 
@@ -171,8 +180,72 @@ namespace SS2Revive
             Log.LogInfo("Awake complete. Press " + ProbeKey.Value + " in game to dump network state.");
         }
 
+        /// <summary>
+        /// Says out loud which builds this can and cannot work on, before the patch report makes
+        /// it look like a hundred small unrelated failures.
+        ///
+        /// The comparison is on major.minor only. Bossa shipped several 1.3.x point builds and the
+        /// patches hold across them; what matters is the 1.5 boundary, where the netcode this
+        /// restores was taken out of the game entirely.
+        /// </summary>
+        private static void WarnAboutGameVersion(string gameVersion)
+        {
+            if (!TryReadMajorMinor(gameVersion, out var major, out var minor))
+            {
+                Log.LogWarning($"Could not read the game version from '{gameVersion}'. This mod was "
+                               + $"built against {TestedGameVersion}; if things do not work, that "
+                               + "mismatch is the first thing to check.");
+                return;
+            }
+
+            if (!TryReadMajorMinor(TestedGameVersion, out var testedMajor, out var testedMinor))
+                return;
+
+            if (major == testedMajor && minor == testedMinor)
+                return;
+
+            if (major > testedMajor || (major == testedMajor && minor >= 5))
+            {
+                Log.LogError("=====================================================================");
+                Log.LogError($"This game is version {gameVersion}. SS2 Revive cannot work on it.");
+                Log.LogError("Build 1.5.0 was the offline patch, and it removed the netcode this "
+                             + "mod exists to restore - there is nothing left for the party, "
+                             + "transport and backend patches to attach to.");
+                Log.LogError($"Install build {TestedGameVersion} instead. installCurrentVersion.ps1 "
+                             + "in the mod's repository downloads it from Steam for an account "
+                             + "that owns the game.");
+                Log.LogError("Everything below this line is a consequence of that, not a separate "
+                             + "problem.");
+                Log.LogError("=====================================================================");
+                return;
+            }
+
+            Log.LogWarning($"This game is version {gameVersion}, and SS2 Revive was built against "
+                           + $"{TestedGameVersion}. It may work; if patches below report FAIL, the "
+                           + "build is the likely reason.");
+        }
+
+        private static bool TryReadMajorMinor(string version, out int major, out int minor)
+        {
+            major = 0;
+            minor = 0;
+
+            if (string.IsNullOrEmpty(version))
+                return false;
+
+            var parts = version.Split('.');
+            return parts.Length >= 2
+                   && int.TryParse(parts[0], out major)
+                   && int.TryParse(parts[1], out minor);
+        }
+
         private void OnDestroy()
         {
+            // Before unpatching: the transport's delivery thread reaches into the game through a
+            // captured MethodInfo, and letting it keep doing that while patches are being pulled
+            // out is the one ordering here that could bite.
+            // Qualified, because this class has a config field of the same name.
+            SS2Revive.SteamTransport.Shutdown();
             _harmony?.UnpatchSelf();
         }
     }

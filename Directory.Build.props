@@ -1,6 +1,18 @@
 <Project>
 
   <!--
+    The one place the mod's version is written down.
+
+    Both assemblies take their <Version> from here, and SS2Revive.csproj generates the
+    PluginVersion constant that [BepInPlugin] needs from the same property - so the number
+    the loader reports, the number in the assembly metadata and the number in the release
+    zip cannot drift apart.
+  -->
+  <PropertyGroup Label="Version">
+    <SS2ReviveVersion>1.0.0</SS2ReviveVersion>
+  </PropertyGroup>
+
+  <!--
     Works out where Surgeon Simulator 2 is installed, so no path from anyone's machine has to be
     committed. Resolution order, first hit wins:
 

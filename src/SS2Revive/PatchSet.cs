@@ -229,14 +229,12 @@ namespace SS2Revive
                                                    PlatformLoggedInUser user,
                                                    PlayerId playerId)
         {
-            // Bossa's JWT gated their own services. Nothing local reads it, but the field is
-            // non-null in the original success path, so it stays non-null here - and when a
-            // replacement backend is configured this is the credential every call to it carries,
-            // because LocalPlayerService.AssignAuthenticationToken stores whatever we pass here
-            // and the HTTP layer reads it back out for the 'Security' header.
-            var token = Plugin.BackendSharedToken.Value;
-            if (string.IsNullOrEmpty(token))
-                token = "ss2revive-local";
+            // Bossa's JWT gated their own services, and nothing left in the process reads it. It
+            // stays a fixed non-empty string because the field is non-null on the original success
+            // path and several callers only check that much - LocalPlayerService.
+            // AssignAuthenticationToken stores it and the HTTP layer would put it in a 'Security'
+            // header, but there is no longer anywhere for that header to go.
+            const string token = "ss2revive-local";
 
             // Each step is guarded separately. A subscriber that dies on a dead backend must not
             // leave the session half-authenticated - IsAuthenticated still has to flip, and the
@@ -362,12 +360,9 @@ namespace SS2Revive
 
         // ----------------------------------------------------------- news feed
 
-        private static string _newsFeedUrl;
-
         private static void ApplyNewsFeed(Harmony harmony)
         {
-            _newsFeedUrl = NewsFeed.Initialise(Plugin.NewsFeedUrl.Value);
-            if (_newsFeedUrl == null)
+            if (NewsFeed.Initialise(Plugin.NewsFeedUrl.Value) == null)
                 return;
 
             // NetworkConfiguration is a struct returned by value, so the postfix takes __result by
@@ -383,7 +378,7 @@ namespace SS2Revive
 
         private static void RewriteNewsFeedUrl(ref Services.Network.NetworkConfiguration __result)
         {
-            __result.newsFeedUrl = _newsFeedUrl;
+            __result.newsFeedUrl = NewsFeed.BaseUrl;
         }
 
         // -------------------------------------------------- progression mirror
@@ -554,6 +549,17 @@ namespace SS2Revive
         private static int _failFastRequestId = 0x4646_0000;
 
         /// <summary>
+        /// Interlocked because the game issues requests from more than one thread, and the request
+        /// scheduler matches responses to requests by id - so two callers handed the same id means
+        /// one completion delivered twice and one never delivered at all.
+        ///
+        /// The three id sources in this plugin start from distinct bases (0x4646, 0x4242, 0x5353)
+        /// so that they cannot collide with each other either.
+        /// </summary>
+        private static int NextFailFastId() =>
+            System.Threading.Interlocked.Increment(ref _failFastRequestId);
+
+        /// <summary>
         /// The status code we answer with is load bearing, not decorative.
         /// HttpRequestScheduler.GetResultType maps 2xx to Success, 4xx to Failed, and everything
         /// else - 5xx, and the -1 the real client uses for timeouts - to Retry. A retried request
@@ -570,7 +576,7 @@ namespace SS2Revive
         /// One prefix over every <c>Request</c> overload. <see cref="BackendRoutes"/> sorts each
         /// request into one of three outcomes.
         ///
-        /// Endpoints the replacement backend implements are rebuilt and sent there by
+        /// Endpoints the backend implements are rebuilt and answered in process by
         /// <see cref="BackendClient"/>. A couple that are known-dead but expensive to refuse are
         /// answered here with a canned 200. Everything else is failed immediately, without opening
         /// a socket: those endpoints resolve to hostnames that no longer exist, so each call would
@@ -585,7 +591,7 @@ namespace SS2Revive
         private static void ApplyHttpInterception(Harmony harmony)
         {
             var label = BackendClient.Available
-                ? "CrappyHttpsRequestService.Request -> " + BackendClient.BaseUrl
+                ? "CrappyHttpsRequestService.Request -> " + BackendClient.BaseUrl + " backend"
                 : "CrappyHttpsRequestService.Request -> fail fast";
 
             Try(label, () =>
@@ -633,7 +639,7 @@ namespace SS2Revive
 
         private static bool MultipartRequest_Prefix(CompleteDelegate onComplete, ref int __result)
         {
-            var requestId = ++_failFastRequestId;
+            var requestId = NextFailFastId();
             __result = requestId;
 
             if (onComplete != null)
@@ -663,14 +669,27 @@ namespace SS2Revive
                                                object[] __args,
                                                ref int __result)
         {
-            int forwardedId;
-            if (BackendClient.TrySend(__originalMethod, __args, out forwardedId))
+            // Guarded, unlike a normal call into BackendClient, because this prefix sits over the
+            // game's entire HTTP surface: an exception escaping here is not one failed request, it
+            // is an exception thrown out of whatever game code happened to be issuing it. Falling
+            // through to fail-fast is always a safe answer, so there is nothing to gain by letting
+            // it propagate.
+            try
             {
-                __result = forwardedId;
-                return false;
+                int handledId;
+                if (BackendClient.TrySend(__originalMethod, __args, out handledId))
+                {
+                    __result = handledId;
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError("Backend routing threw for " + __originalMethod.Name
+                                    + "; failing the request instead. " + ex);
             }
 
-            var requestId = ++_failFastRequestId;
+            var requestId = NextFailFastId();
             __result = requestId;
 
             // The completion delegate is always the final argument across every overload.

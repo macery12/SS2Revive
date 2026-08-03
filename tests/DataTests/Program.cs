@@ -34,6 +34,7 @@ namespace SS2ReviveData.Tests
                 RunCatalogueTests(gameRoot, scratch);
                 RunBackendTests(gameRoot, scratch);
                 RunChallengeRolloverTests(scratch);
+                RunDurabilityTests(scratch);
                 RunUgcStoreTests(scratch);
             }
             catch (Exception ex)
@@ -500,6 +501,33 @@ namespace SS2ReviveData.Tests
             Check("a later worse run cannot roll the mirror backwards",
                 afterFail["scores"][0]["grade"].AsString() == "A++");
 
+            // A figure the client never sent must stay unknown rather than becoming zero. Zero
+            // wins every best-of-lowest comparison there is, so recording one would pin the level
+            // at a time nothing could beat and then report that back as a real run.
+            Ok(backend, "POST", "/player-progression/campaignLevels/lvl-2/players/" + PlayerA + "/completed",
+                "{\"campaignId\":\"c1\",\"grade\":\"PASS\"}");
+            var noInformation = FindScore(
+                Ok(backend, "GET", "/player-progression/players/" + PlayerA + "/campaigns"), "lvl-2");
+            var blank = Json.Parse(noInformation["information"].AsString());
+            Check("a completion with no information records no best time",
+                blank["bestTime"] == null && blank["bestBloodLoss"] == null);
+
+            Ok(backend, "POST", "/player-progression/campaignLevels/lvl-2/players/" + PlayerA + "/completed",
+                "{\"campaignId\":\"c1\",\"grade\":\"PASS\",\"information\":\"{\\\"bestTime\\\":120}\"}");
+            var thenTimed = FindScore(
+                Ok(backend, "GET", "/player-progression/players/" + PlayerA + "/campaigns"), "lvl-2");
+            Check("and a real time afterwards is still able to win",
+                Json.Parse(thenTimed["information"].AsString())["bestTime"].AsDouble() == 120);
+
+            // Half a body is the same hazard as none of it.
+            Ok(backend, "POST", "/player-progression/campaignLevels/lvl-3/players/" + PlayerA + "/completed",
+                "{\"campaignId\":\"c1\",\"grade\":\"PASS\",\"information\":\"{\\\"bestTime\\\":60}\"}");
+            var partialInfo = FindScore(
+                Ok(backend, "GET", "/player-progression/players/" + PlayerA + "/campaigns"), "lvl-3");
+            var half = Json.Parse(partialInfo["information"].AsString());
+            Check("one known figure does not fabricate the other",
+                half["bestTime"].AsDouble() == 60 && half["bestBloodLoss"] == null);
+
             // -- cosmetics
 
             if (backend.CosmeticsAvailable)
@@ -667,6 +695,82 @@ namespace SS2ReviveData.Tests
             Clock.Source = null;
         }
 
+        // ------------------------------------------------------------- durability
+
+        /// <summary>
+        /// What happens to a save this build should not touch, and what is left behind when it
+        /// touches one it should.
+        ///
+        /// Both of these are about the same failure: a progress file is the only thing in the mod
+        /// that cannot be regenerated from the game's own install, so every path that could damage
+        /// one is worth a check that would notice.
+        /// </summary>
+        private static void RunDurabilityTests(string scratch)
+        {
+            Section("durability");
+
+            // -- a file from a newer build
+
+            var future = Path.Combine(scratch, "future");
+            Directory.CreateDirectory(future);
+            var futureFile = SaveLocation.StateFile(future);
+
+            var futureContents =
+                "{\"version\":99,\"savedAt\":1,\"players\":[{\"playerId\":\"" + PlayerA
+                + "\",\"seasonXp\":999999,\"seasonLevel\":50}]}";
+            File.WriteAllText(futureFile, futureContents);
+
+            var warnings = new List<string>();
+            var refused = new LocalBackend(new LocalBackendOptions
+            {
+                SaveDirectory = future,
+                LocalPlayerId = PlayerA,
+            }, _ => { }, warnings.Add);
+
+            // Searched for rather than counted: this backend has no ContentDirectory, so it also
+            // warns about the missing cosmetics catalogue.
+            Check("a save from a newer format is refused rather than misread",
+                warnings.Exists(w => w.Contains("newer version") && w.Contains("99")));
+
+            var fresh = Ok(refused, "GET",
+                "/player-progression/playerProgression/players/" + PlayerA + "/progression");
+            Check("and the session starts from empty instead", fresh["currentSeasonXp"].AsLong() == 0);
+
+            // The point of refusing: playing on must not overwrite what could not be read.
+            refused.MirrorProgression(PlayerA, 10, 2, 2);
+            Check("and playing on does not overwrite it",
+                File.ReadAllText(futureFile) == futureContents);
+
+            // -- the backup the atomic write leaves behind
+
+            var live = Path.Combine(scratch, "durable");
+            var backend = new LocalBackend(new LocalBackendOptions
+            {
+                SaveDirectory = live,
+                LocalPlayerId = PlayerA,
+            }, _ => { }, _ => { });
+
+            var stateFile = SaveLocation.StateFile(live);
+
+            backend.MirrorProgression(PlayerA, 100, 2, 2);
+            Check("the first save writes the file", File.Exists(stateFile));
+            Check("with nothing displaced, there is no backup yet",
+                !File.Exists(stateFile + ".bak"));
+
+            backend.MirrorProgression(PlayerA, 200, 3, 3);
+            Check("the second save keeps the copy it replaced", File.Exists(stateFile + ".bak"));
+
+            var current = Json.Parse(File.ReadAllText(stateFile));
+            var previous = Json.Parse(File.ReadAllText(stateFile + ".bak"));
+            Check("the live file is the newer state",
+                current["players"][0]["seasonXp"].AsLong() == 200);
+            Check("and the backup is the older one, intact and parseable",
+                previous["players"][0]["seasonXp"].AsLong() == 100);
+
+            // No temporary file may survive a completed write, or the next one resumes from it.
+            Check("no .tmp is left behind", !File.Exists(stateFile + ".tmp"));
+        }
+
         // ---------------------------------------------------------------- helpers
 
         private sealed class StubPeers : IPeerDirectory
@@ -692,6 +796,15 @@ namespace SS2ReviveData.Tests
                 userName = _name;
                 return playerId == _playerId;
             }
+        }
+
+        private static Json FindScore(Json response, string levelSequenceId)
+        {
+            foreach (var score in response["scores"].Items)
+            {
+                if (score["campaignLevelSequenceId"].AsString() == levelSequenceId) return score;
+            }
+            throw new InvalidOperationException("Level " + levelSequenceId + " missing from the mirror.");
         }
 
         private static Json FindChallenge(Json response, string challengeId)

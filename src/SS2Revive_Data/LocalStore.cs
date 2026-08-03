@@ -18,9 +18,17 @@ namespace SS2ReviveData
         public string PlayerId;
         public string UserName = string.Empty;
         public long SeasonXp;
-        public long GlobalXp;
         public int SeasonLevel = 1;
+
+        /// <summary>
+        /// Kept separately from <see cref="SeasonLevel"/> only because the client reads it as its
+        /// own field. There is no separate global XP counter: <c>LocalBackend.ProgressionJson</c>
+        /// serves the season total for both, because the client displays the season figures and
+        /// reads only the *level* out of the global pair - so a second independent total would be
+        /// a number this backend invented rather than one it observed.
+        /// </summary>
         public int GlobalLevel = 1;
+
         public long UpdatedAt;
 
         public DailyChallengeRecord Challenges;
@@ -33,7 +41,6 @@ namespace SS2ReviveData
                 .Add("playerId", PlayerId)
                 .Add("userName", UserName)
                 .Add("seasonXp", SeasonXp)
-                .Add("globalXp", GlobalXp)
                 .Add("seasonLevel", SeasonLevel)
                 .Add("globalLevel", GlobalLevel)
                 .Add("updatedAt", UpdatedAt)
@@ -51,7 +58,6 @@ namespace SS2ReviveData
                 PlayerId = value["playerId"].AsStringOr(string.Empty),
                 UserName = value["userName"].AsStringOr(string.Empty),
                 SeasonXp = value["seasonXp"].AsLongOr(0),
-                GlobalXp = value["globalXp"].AsLongOr(0),
                 SeasonLevel = value["seasonLevel"].AsIntOr(1),
                 GlobalLevel = value["globalLevel"].AsIntOr(1),
                 UpdatedAt = value["updatedAt"].AsLongOr(0),
@@ -75,9 +81,11 @@ namespace SS2ReviveData
     /// player can read it, back it up, and fix it by hand - which matters more for a mod restoring
     /// a dead service than write throughput ever will.
     ///
-    /// Writes go to a temporary file and are then moved into place, so an interrupted write leaves
-    /// the previous state intact rather than a truncated file. All access is serialised through
-    /// <see cref="Gate"/>; the caller runs requests on a worker thread.
+    /// Writes go through <see cref="AtomicFile"/>, so an interrupted write leaves the previous
+    /// state intact rather than a truncated file - and this is the one file in the mod whose loss
+    /// cannot be recovered from anywhere else, so it also keeps a <c>.bak</c> of the copy it
+    /// displaced. All access is serialised through <see cref="Gate"/>; the caller runs requests on
+    /// a worker thread.
     /// </summary>
     public sealed class LocalStore
     {
@@ -89,9 +97,20 @@ namespace SS2ReviveData
         private readonly string _file;
         private readonly Action<string> _warn;
 
+        /// <summary>
+        /// Set when the file on disk was written by a newer build than this one. Everything still
+        /// works for the session - the player gets a fresh, empty state and can play - but nothing
+        /// is written back, because the alternative is overwriting a save this build could not
+        /// read with one that has none of its contents.
+        /// </summary>
+        private bool _readOnly;
+
         public readonly object Gate = new object();
 
         public string FilePath => _file;
+
+        /// <summary>True when the save on disk is from a newer format and is being left alone.</summary>
+        public bool IsReadOnly => _readOnly;
 
         public LocalStore(string file, Action<string> warn = null)
         {
@@ -113,6 +132,24 @@ namespace SS2ReviveData
                 if (players == null)
                 {
                     _warn("Progress file at " + _file + " is not readable; starting from empty.");
+                    return;
+                }
+
+                // The version has been written since the first release; reading it is what makes
+                // it worth anything. A file from a future build may have moved a field this one
+                // still reads, and interpreting it anyway would not fail loudly - it would load a
+                // plausible-looking save with the wrong numbers in it, and then overwrite the real
+                // one on the next mutation. Refusing costs a session's progress; guessing costs
+                // all of it.
+                var version = root["version"].AsIntOr(1);
+                if (version > CurrentVersion)
+                {
+                    _warn("Progress file at " + _file + " was written by a newer version of "
+                          + "SS2Revive (format " + version + ", this build reads " + CurrentVersion
+                          + "). Refusing to read it rather than risk misreading it - the file has "
+                          + "been left alone. Update the mod, or move that file aside to start "
+                          + "fresh.");
+                    _readOnly = true;
                     return;
                 }
 
@@ -150,11 +187,6 @@ namespace SS2ReviveData
             return _players.TryGetValue(playerId, out var record) ? record : null;
         }
 
-        public int PlayerCount
-        {
-            get { lock (Gate) return _players.Count; }
-        }
-
         /// <summary>
         /// Rewrites the file. Call with <see cref="Gate"/> held.
         ///
@@ -164,6 +196,8 @@ namespace SS2ReviveData
         /// </summary>
         public void Save()
         {
+            if (_readOnly) return;
+
             try
             {
                 var players = Json.Array();
@@ -175,17 +209,8 @@ namespace SS2ReviveData
                     .Add("savedAt", Clock.NowMs())
                     .Add("players", players);
 
-                var directory = Path.GetDirectoryName(_file);
-                if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
-
-                var temporary = _file + ".tmp";
-                File.WriteAllText(temporary, Indent(root.ToString()), Encoding.UTF8);
-
-                // File.Move refuses to overwrite on .NET Framework, so the old file goes first.
-                // The window between the two is why the temporary file is kept rather than
-                // written in place: a crash inside it loses at most the newest mutation.
-                if (File.Exists(_file)) File.Delete(_file);
-                File.Move(temporary, _file);
+                AtomicFile.WriteAllText(_file, Indent(root.ToString()), Encoding.UTF8,
+                                        keepBackup: true);
             }
             catch (Exception ex)
             {

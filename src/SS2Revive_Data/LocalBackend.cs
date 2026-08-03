@@ -188,7 +188,6 @@ namespace SS2ReviveData
                 }
 
                 record.SeasonXp = seasonXp;
-                record.GlobalXp = Math.Max(record.GlobalXp, seasonXp);
                 record.SeasonLevel = seasonLevel;
                 record.GlobalLevel = globalLevel;
                 record.UpdatedAt = Clock.NowMs();
@@ -537,7 +536,6 @@ namespace SS2ReviveData
             if (amount <= 0) return;
 
             record.SeasonXp += amount;
-            record.GlobalXp += amount;
             record.SeasonLevel = PlayerInventory.SeasonLevelForXp(Catalogue, record.SeasonXp);
             record.GlobalLevel = record.SeasonLevel;
             record.UpdatedAt = Clock.NowMs();

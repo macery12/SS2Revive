@@ -131,6 +131,7 @@ namespace SS2ReviveData
             for (var i = 0; i < Images.Count; i++) images.Add(Images[i].ToStorage());
 
             return Json.Object()
+                .Add("version", UgcStore.CurrentFormatVersion)
                 .Add("id", Id)
                 .Add("title", Title)
                 .Add("description", Description)
@@ -237,6 +238,17 @@ namespace SS2ReviveData
 
         public const int DefaultResultsPerPage = 20;
 
+        /// <summary>
+        /// The asset.json layout this build writes and can read.
+        ///
+        /// A level written by a newer build is skipped rather than half-read, for the same reason
+        /// the progress file refuses one: a level loaded with fields this build does not know about
+        /// would be silently rewritten without them on the very next save, which is how a level
+        /// quietly loses its configurations. Files predating this field read as 1, which is what
+        /// they are.
+        /// </summary>
+        public const int CurrentFormatVersion = 1;
+
         /// <summary>Marks a key as ours. The game hands keys it does not understand straight to
         /// S3, so anything we mint has to be recognisable on sight.</summary>
         public const string KeyPrefix = "ss2revive/";
@@ -274,13 +286,6 @@ namespace SS2ReviveData
         // ------------------------------------------------------------------ time
 
         public static long NowMs() => (long)(DateTime.UtcNow - Epoch).TotalMilliseconds;
-
-        public static long ToUnixMs(DateTime value)
-        {
-            var utc = value.Kind == DateTimeKind.Utc ? value : value.ToUniversalTime();
-            var elapsed = utc - Epoch;
-            return elapsed.Ticks <= 0 ? 0 : (long)elapsed.TotalMilliseconds;
-        }
 
         // ------------------------------------------------------------------ read
 
@@ -665,11 +670,7 @@ namespace SS2ReviveData
 
             try
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
-                var temporary = path + ".tmp";
-                File.WriteAllBytes(temporary, data);
-                if (File.Exists(path)) File.Delete(path);
-                File.Move(temporary, path);
+                AtomicFile.WriteAllBytes(path, data);
                 return true;
             }
             catch (Exception ex)
@@ -699,15 +700,10 @@ namespace SS2ReviveData
             var file = Path.Combine(LevelDirectory(level.Id), "asset.json");
             try
             {
-                Directory.CreateDirectory(LevelDirectory(level.Id));
-
                 var builder = new StringBuilder(2048);
                 level.ToStorage().Write(builder);
 
-                var temporary = file + ".tmp";
-                File.WriteAllText(temporary, builder.ToString(), new UTF8Encoding(false));
-                if (File.Exists(file)) File.Delete(file);
-                File.Move(temporary, file);
+                AtomicFile.WriteAllText(file, builder.ToString(), new UTF8Encoding(false));
             }
             catch (Exception ex)
             {
@@ -739,6 +735,17 @@ namespace SS2ReviveData
                     if (parsed == null)
                     {
                         _warn("Skipping unreadable level metadata at " + file);
+                        continue;
+                    }
+
+                    // Skipped, not half-read. A level this build cannot fully understand would be
+                    // rewritten without the parts it dropped on the next autosave.
+                    var version = parsed["version"].AsIntOr(1);
+                    if (version > CurrentFormatVersion)
+                    {
+                        _warn("Skipping the level at " + directories[i] + ": it was written by a "
+                              + "newer version of SS2Revive (format " + version + ", this build "
+                              + "reads " + CurrentFormatVersion + "). It has been left untouched.");
                         continue;
                     }
 

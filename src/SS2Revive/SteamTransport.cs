@@ -513,11 +513,21 @@ namespace SS2Revive
             }
         }
 
+        /// <summary>
+        /// Called from <c>Plugin.OnDestroy</c>, before Harmony unpatches.
+        ///
+        /// The delivery thread reaches into the game through a MethodInfo captured from a patched
+        /// type, so it has to stop before those patches come out. It is a background thread and so
+        /// cannot hold the process open on its own; this is about ordering, not about exiting.
+        /// </summary>
         internal static void Shutdown()
         {
             _exiting = true;
             InboundReady.Set();
             _deliveryThread = null;
+            _clientManager = null;
+            _onReceivePacket = null;
+            Reset();
         }
 
         internal static int QueuedSends

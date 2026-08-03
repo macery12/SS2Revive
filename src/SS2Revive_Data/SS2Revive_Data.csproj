@@ -30,7 +30,8 @@
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
-    <Version>0.2.0</Version>
+    <!-- Set once in Directory.Build.props at the repository root. -->
+    <Version>$(SS2ReviveVersion)</Version>
     <DebugType>portable</DebugType>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>

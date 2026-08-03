@@ -170,12 +170,30 @@ namespace SS2Revive
         /// </summary>
         internal static int Handle(PartyApi.HttpRequest request, PlayerId playerId)
         {
-            var requestId = ++_nextRequestId;
+            var requestId = System.Threading.Interlocked.Increment(ref _nextRequestId);
 
             // Logged unconditionally. Party traffic is a handful of requests a minute, and when
             // the state machine stalls the only way to see it is the request it keeps repeating.
             Plugin.Log.LogInfo("party <- " + request.type);
 
+            try
+            {
+                Dispatch(requestId, request, playerId);
+            }
+            catch (Exception ex)
+            {
+                // The state machine is waiting on this id and has no timeout of its own, so an
+                // unanswered request is a party that never advances again. 503 is the shape it
+                // reads as "transient": it retries rather than concluding anything.
+                Plugin.Log.LogError("Party request " + request.type + " threw: " + ex);
+                Respond(requestId, 503, string.Empty);
+            }
+
+            return requestId;
+        }
+
+        private static void Dispatch(int requestId, PartyApi.HttpRequest request, PlayerId playerId)
+        {
             // Every branch below reaches SteamMatchmaking, and every one of those throws once the
             // Steam API is down. That happens on the way out: SteamManager is destroyed before
             // Shell, and Shell.OnApplicationQuit then calls PartyService.Shutdown, which sends one
@@ -187,10 +205,10 @@ namespace SS2Revive
                 // 503 with an empty body is the transient-failure shape: the state machine retries
                 // rather than concluding anything, so a Steam client that comes back is recovered
                 // from. On the quit path there is no next frame, so this is simply dropped.
-                _lobby = CSteamID.Nil;
+                ForgetLobby();
                 Plugin.Log.LogInfo("Steam is not available; failing party request " + request.type + ".");
                 Respond(requestId, 503, string.Empty);
-                return requestId;
+                return;
             }
 
             // Not for a join: that request carries its own destination, and the latch may not be
@@ -278,8 +296,6 @@ namespace SS2Revive
                     Respond(requestId, 404, string.Empty);
                     break;
             }
-
-            return requestId;
         }
 
         // ------------------------------------------------------------------ steam lobby
@@ -378,8 +394,24 @@ namespace SS2Revive
 
             Plugin.Log.LogInfo("Leaving Steam lobby " + _lobby.m_SteamID);
             SteamMatchmaking.LeaveLobby(_lobby);
+            ForgetLobby();
+        }
+
+        /// <summary>
+        /// Drops every piece of state that was only true while we were in that lobby.
+        ///
+        /// The transport reset is the part that matters. Its peer table is what decides whether a
+        /// synthetic endpoint gets translated into a Steam message, and it is only ever added to -
+        /// so without this, everyone from every party this session stays addressable for the rest
+        /// of it. Packets aimed at someone who left would keep going out over Steam instead of
+        /// falling through to the original UDP path, and the queues would still be holding their
+        /// traffic.
+        /// </summary>
+        private static void ForgetLobby()
+        {
             _lobby = CSteamID.Nil;
             _locked = false;
+            SteamTransport.Reset();
         }
 
         private static void OnLobbyCreated(LobbyCreated_t result, bool ioFailure)
@@ -472,8 +504,7 @@ namespace SS2Revive
             {
                 Plugin.Log.LogInfo("We left lobby " + _lobby.m_SteamID
                                    + " (" + (EChatMemberStateChange)update.m_rgfChatMemberStateChange + ").");
-                _lobby = CSteamID.Nil;
-                _locked = false;
+                ForgetLobby();
                 return;
             }
 
