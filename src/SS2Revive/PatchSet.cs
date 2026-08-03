@@ -52,6 +52,12 @@ namespace SS2Revive
                 ApplySteamTransport(harmony);
             }
 
+            // The transition screen is patched for two unrelated reasons - matchmaking that can
+            // never arrive, and a creator-mode party that can never be joined - so it goes in
+            // whenever either of those is being handled. The prefix checks both settings itself.
+            if (Plugin.SkipMatchmaking.Value || Plugin.CreationMode.Value)
+                ApplyTransitionScreenFixes(harmony);
+
             if (Plugin.SkipMatchmaking.Value)
                 ApplyMatchmakingSkip(harmony);
 
@@ -720,24 +726,11 @@ namespace SS2Revive
             return false;
         }
 
-        // ----------------------------------------------------------- matchmaking
+        // ------------------------------------------------------ transition screen
 
-        /// <summary>
-        /// Both entry points into the vactube screen (PlayersEnterTransitionCommand when a level
-        /// starts, CheckRematchmakingCommand when one ends) ask it to hold for four players
-        /// whenever matchmaking is wanted. LevelTransitionScreen.Show only arms its six-second
-        /// auto-load when the target is already met; otherwise it shows a 60-second countdown and
-        /// waits on players that Bossa's matchmaker was supposed to send. That matchmaker is gone,
-        /// so the countdown always expires, and the expiry branch keys off MatchmakingService's
-        /// state - which never leaves Idle here, so neither timer gets rearmed and the screen
-        /// sits there for good.
-        ///
-        /// Clamping the target to the players actually standing in the tubes takes the first
-        /// branch instead: no countdown, no waiting-for-player tubes, auto-load after six seconds.
-        /// </summary>
-        private static void ApplyMatchmakingSkip(Harmony harmony)
+        private static void ApplyTransitionScreenFixes(Harmony harmony)
         {
-            Try("LevelTransitionScreen.Show -> never wait for matchmade players", () =>
+            Try("LevelTransitionScreen.Show -> no matchmaking wait, no creator-party wait", () =>
             {
                 var target = Method(typeof(LevelTransitionScreen), "Show", new[]
                 {
@@ -749,7 +742,76 @@ namespace SS2Revive
                 harmony.Patch(target, new HarmonyMethod(
                     AccessTools.Method(typeof(PatchSet), nameof(TransitionShow_Prefix))));
             });
+        }
 
+        /// <summary>
+        /// Two independent problems, both fixed by rewriting an argument on the way in.
+        ///
+        /// <paramref name="targetPlayerCount"/> - both entry points into the vactube screen
+        /// (PlayersEnterTransitionCommand when a level starts, CheckRematchmakingCommand when one
+        /// ends) ask it to hold for four players whenever matchmaking is wanted. Show only arms its
+        /// six-second auto-load when the target is already met; otherwise it shows a 60-second
+        /// countdown and waits on players that Bossa's matchmaker was supposed to send. That
+        /// matchmaker is gone, so the countdown always expires, and the expiry branch keys off
+        /// MatchmakingService's state - which never leaves Idle here, so neither timer gets rearmed
+        /// and the screen sits there for good. Clamping the target to the players actually standing
+        /// in the tubes takes the first branch instead: no countdown, no waiting-for-player tubes,
+        /// auto-load after six seconds.
+        ///
+        /// <paramref name="waitingOnCreationPartyChange"/> - Creation Mode. Bossa's party server
+        /// let you join a party *by id*, creating it if it did not exist, so the level editor put
+        /// everyone editing a level into one party keyed by the level's own server id:
+        ///
+        ///     partyService.CreateOrJoinParty(playerId, new Guid(nextLevelSummaryOpt.serverLevelId));
+        ///
+        /// and the transition screen then refuses to load until the current party id equals that
+        /// same level id. Our party ids are Steam lobby handles, so that comparison can never come
+        /// out true and the editor never opens - Update just logs "Party has not been joined yet,
+        /// wait another second" and pushes the auto-load a second further away, for ever.
+        ///
+        /// It also crashes on the way there. That branch reads <c>nextLevelSummaryOpt.serverLevelId</c>
+        /// with no null check, from a <c>GetInfo</c> out-parameter the game itself marks
+        /// <c>[CanBeNull]</c> - so a queue that has moved on by the time the timer expires throws
+        /// NullReferenceException out of Update, every frame.
+        ///
+        /// Clearing the flag drops the whole branch, and loses nothing: there is no shared level to
+        /// co-edit any more, because the level library is local. Keeping the party we already have
+        /// is also better than what the original did, which was to leave your friends' party to
+        /// join a level party none of them can see.
+        /// </summary>
+        private static void TransitionShow_Prefix(
+            List<LevelTransitionScreen.VactubePlayerInfo> vactubePlayerInfo,
+            ref int targetPlayerCount,
+            ref bool waitingOnCreationPartyChange)
+        {
+            if (Plugin.CreationMode.Value && waitingOnCreationPartyChange)
+            {
+                Plugin.Log.LogInfo("Transition screen wanted to wait for a party named after the "
+                                   + "level being edited; there is no such party here, so loading "
+                                   + "the editor now.");
+                waitingOnCreationPartyChange = false;
+            }
+
+            if (!Plugin.SkipMatchmaking.Value)
+                return;
+
+            var present = vactubePlayerInfo == null ? 0 : vactubePlayerInfo.Count;
+
+            // present == 0 would make the screen think its target is met with nobody in it; leave
+            // that case to the original, which has its own handling for an empty group.
+            if (present <= 0 || targetPlayerCount <= present)
+                return;
+
+            Plugin.Log.LogInfo("Transition screen wanted " + targetPlayerCount + " players but "
+                               + present + " are here; starting now instead of waiting on "
+                               + "matchmaking.");
+            targetPlayerCount = present;
+        }
+
+        // ----------------------------------------------------------- matchmaking
+
+        private static void ApplyMatchmakingSkip(Harmony harmony)
+        {
             Try("LevelQueueService.ReplayCurrentLevel -> requeue campaign level", () =>
             {
                 var target = Method(typeof(LevelQueueService), "ReplayCurrentLevel");
@@ -770,23 +832,6 @@ namespace SS2Revive
                         AccessTools.Method(typeof(PatchSet), nameof(RefuseMatchmaking_Prefix))));
                 });
             }
-        }
-
-        private static void TransitionShow_Prefix(
-            List<LevelTransitionScreen.VactubePlayerInfo> vactubePlayerInfo,
-            ref int targetPlayerCount)
-        {
-            var present = vactubePlayerInfo == null ? 0 : vactubePlayerInfo.Count;
-
-            // present == 0 would make the screen think its target is met with nobody in it; leave
-            // that case to the original, which has its own handling for an empty group.
-            if (present <= 0 || targetPlayerCount <= present)
-                return;
-
-            Plugin.Log.LogInfo("Transition screen wanted " + targetPlayerCount + " players but "
-                               + present + " are here; starting now instead of waiting on "
-                               + "matchmaking.");
-            targetPlayerCount = present;
         }
 
         private static bool RefuseMatchmaking_Prefix(ref bool __result)
@@ -872,7 +917,7 @@ namespace SS2Revive
             // there is a window where the player is deliberately in no party. Only this call knows
             // that window is on purpose; by the time the join request arrives it is too late to
             // stop a lobby having been created in the meantime.
-            Try("PartyService.CreateOrJoinParty -> note join intent", () =>
+            Try("PartyService.CreateOrJoinParty -> note join intent, refuse ids we cannot join", () =>
             {
                 var target = Method(typeof(PartyService), "CreateOrJoinParty",
                     new[] { typeof(PlayerId), typeof(Bossa.Framework.Utils.Guid) });
@@ -942,12 +987,32 @@ namespace SS2Revive
         }
 
         /// <summary>
-        /// Observes only - the original still runs, because the entire leave-then-join sequence is
-        /// Bossa's and works correctly once we stop competing with it for the lobby.
+        /// For a party id we can act on this observes only - the original still runs, because the
+        /// entire leave-then-join sequence is Bossa's and works correctly once we stop competing
+        /// with it for the lobby.
+        ///
+        /// An id that is not one of ours is refused outright instead. There are three callers, and
+        /// two of them (the launch command line, and an accepted Steam invite) can only ever pass a
+        /// lobby handle we minted. The third is the level editor, which asks to join a party named
+        /// after the level being edited - a party that exists nowhere, because our party is a Steam
+        /// lobby and Bossa's join-or-create-by-id is what made that trick work.
+        ///
+        /// Left to run, the original would leave the lobby the player is actually in, fail the
+        /// join, and build a fresh party of one. Refusing keeps the party they have - including the
+        /// friends in it, who are exactly who they would want to playtest with.
         /// </summary>
-        private static void CreateOrJoinParty_Prefix(Bossa.Framework.Utils.Guid partyId)
+        private static bool CreateOrJoinParty_Prefix(Bossa.Framework.Utils.Guid partyId)
         {
+            if (!PartyBackend.TryDecodeLobby(partyId, out _))
+            {
+                Plugin.Log.LogInfo("Ignoring a request to join party " + partyId
+                                   + ": it is not a Steam lobby handle, so there is nothing to "
+                                   + "join. Staying in the current party.");
+                return false;
+            }
+
             PartyBackend.NoteJoinIntent(partyId);
+            return true;
         }
 
         private static bool PlatformUserId_Prefix(PlayerId targetPlayerId,
