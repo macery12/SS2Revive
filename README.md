@@ -1,173 +1,155 @@
 # SS2 Revive
 
-Built against **Surgeon Simulator 2 build 1.3.7.3054** on Windows. Other builds are untested;
-1.5.x will not work, because the offline patch removed the netcode this restores. See
-[Getting build 1.3.7](#getting-build-137) if Steam is serving you 1.5.x.
+Restores multiplayer, progression, and Creation Mode to **Surgeon Simulator 2** after Bossa's servers went offline.
 
-> **Not affiliated with Bossa Studios or Curve Games.** This is an unofficial fan modification,
-> made to keep a game working after its servers were retired. It ships no game code and no game
-> assets. See the disclaimer at the bottom.
+> **Not affiliated with Bossa Studios or Curve Games.** Unofficial fan mod. Ships no game code, no game assets. See [Disclaimer](#disclaimer).
 
-## What it restores
+- **Requires build:** 1.3.7.3054, Windows 64-bit
+- **1.5.x will NOT work** — the offline patch removed the netcode this mod restores. If Steam is serving you 1.5.x, see [Getting Build 1.3.7](#getting-build-137).
 
-Sign-in and the version check no longer block startup. Parties, invites and joining run through
-Steam lobbies, and in-game traffic goes peer to peer over Steam instead of through Bossa's relay.
-Progression, daily challenges, campaign grades and the cosmetic inventory are served locally and
-saved to your own machine. Creation Mode works again: levels are built, saved, playtested and kept
-on your own disk rather than uploaded. The main menu news tiles read from a file you can edit.
+---
+
+## Quick Start
+
+**New install:**
+```powershell
+.\installCurrentVersion.ps1
+```
+Enter your Steam login when prompted — [DepotDownloader](https://github.com/SteamRE/DepotDownloader) handles the password/Guard code and fetches the game itself. This creates a **separate folder**; your normal Steam copy (1.5.x) is untouched. Launch with the generated `Launch Surgeon Simulator 2 - 1.3.7.cmd`.
+
+**Already have 1.3.7 installed?** Skip to [Install](#install), step 3.
+
+---
+
+## What It Restores
+
+- **Sign-in & version check** — no longer blocks startup
+- **Parties & invites** — via Steam lobbies
+- **Multiplayer traffic** — peer-to-peer over Steam, not Bossa's relay
+- **Progression** — daily challenges, campaign grades, cosmetics all served & saved locally
+- **Creation Mode** — build, save, and playtest levels to your own disk
+- **Main menu news tiles** — reads from a local, editable file
+
+---
 
 ## Requirements
 
 - Surgeon Simulator 2 on Steam, Windows 64-bit, **build 1.3.7**
-- BepInEx 5.4.23.2, x64. Direct download:
-  [BepInEx_win_x64_5.4.23.2.zip](https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.2/BepInEx_win_x64_5.4.23.2.zip)
-  ([all files for that release](https://github.com/BepInEx/BepInEx/releases/tag/v5.4.23.2))
+- BepInEx 5.4.23.2, **x64** — [direct download](https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.2/BepInEx_win_x64_5.4.23.2.zip) ([all files](https://github.com/BepInEx/BepInEx/releases/tag/v5.4.23.2))
 - Steam running and signed in
 
-BepInEx is not included here. Take the **x64** build: the 32-bit one installs without complaining
-and then loads nothing at all.
+> ⚠️ Get the **x64** build specifically — the 32-bit one installs without complaining, then loads nothing.
 
-## Getting build 1.3.7
+---
 
-Steam serves 1.5.x by default. See the top of this doc for why that build won't work; there is
-nothing left in it for the mod to attach to, and it will say so in the log and stop rather than
-half-working.
+## Getting Build 1.3.7
 
-New install → run `installCurrentVersion.ps1` below. Already have a 1.3.7 install → skip to
-[Install](#install), step 3.
+Steam serves 1.5.x by default, which won't work with this mod.
 
-`installCurrentVersion.ps1` in this repository does the whole install - the game, BepInEx and the
-mod:
+- **New install** → run `installCurrentVersion.ps1` (see [Quick Start](#quick-start))
+- **Already have 1.3.7** → skip to [Install](#install), step 3
 
-```powershell
-.\installCurrentVersion.ps1
-```
+<details>
+<summary>Why 1.5.x doesn't work / how the installer works</summary>
 
-It asks where to install, then for the login name of the Steam account that owns the game, and
-hands the login off to [DepotDownloader](https://github.com/SteamRE/DepotDownloader) - an official
-SteamRE tool - which prompts for the password and Steam Guard code itself. Nothing about your
-credentials is stored by this script. It only fetches a build of a game the account already owns.
+1.5.x removed the netcode the mod attaches to. The mod will detect this, log it, and stop rather than half-working.
 
-The mod comes from the latest release here. If there is no release yet, or GitHub cannot be
-reached, it says so and carries on: you get a working 1.3.7 with BepInEx on it, and the three
-files to drop in yourself.
+`installCurrentVersion.ps1` does the whole install — game, BepInEx, and the mod. It asks where to install, then for the Steam login of the account that owns the game, and hands that off to DepotDownloader, which prompts for the password and Steam Guard code itself. **Nothing about your credentials is stored by this script** — it only fetches a build of a game the account already owns.
 
-The result is a **separate, self-contained folder**, not a change to your Steam copy. Steam keeps
-serving 1.5.x to your library and is not aware of it; the installer writes a
-`Launch Surgeon Simulator 2 - 1.3.7.cmd` next to the game to start it. It also writes
-`steam_appid.txt`, without which `SteamAPI.Init` has no app id to resolve outside a Steam launch
-and the game stops at "Authentication Failed: Platform Authentication Error".
+The result is a separate, self-contained folder, not a change to your Steam copy. Steam keeps serving 1.5.x to your library and is unaware of this folder. The installer also writes `steam_appid.txt` — without it, `SteamAPI.Init` has no app ID to resolve outside a Steam launch, and the game stops at "Authentication Failed: Platform Authentication Error."
 
-Steam still has to be running and signed in when you play, because parties, invites and
-peer-to-peer traffic all go through it.
+Steam still needs to be running and signed in when you play — parties, invites, and P2P traffic all go through it.
+
+</details>
+
+---
 
 ## Install
 
-Only needed if you did not use `installCurrentVersion.ps1`, or if it could not fetch a release - in
-which case steps 1 and 2 are already done and you only need step 3.
+*Only needed if you skipped the installer, or it couldn't fetch a release (in which case steps 1–2 are already done).*
 
-**1. Install BepInEx.** Extract the zip into your game folder, the one containing the .exe. It is
-usually at `steamapps\common\Surgeon Simulator 2`, and Steam will take you there with right click
-on the game, then Manage, then Browse local files. When you are done, `winhttp.dll`,
-`doorstop_config.ini` and a `BepInEx\` folder should be sitting next to the exe.
+1. **Install BepInEx.** Extract the zip into your game folder (the one with the `.exe` — usually `steamapps\common\Surgeon Simulator 2`; right-click the game in Steam → Manage → Browse local files). You should end up with `winhttp.dll`, `doorstop_config.ini`, and a `BepInEx\` folder next to the exe.
+2. **Launch the game once through Steam, then quit.** This lets BepInEx create its `config`/`plugins` folders and a first `LogOutput.log`.
+3. **Install the plugin.** Download the latest release and copy its contents into:
+   ```
+   Surgeon Simulator 2\BepInEx\plugins\SS2Revive\
+   ```
+   You need `SS2Revive.dll`, `SS2Revive_Data.dll`, and the `newsfeed` folder — all together in that one folder. Both DLLs must sit side by side (BepInEx resolves a plugin's dependencies from its own folder).
+4. **Launch the game.** Confirm it loaded by checking `BepInEx\LogOutput.log` for lines tagged `[Info   :SS2 Revive]`.
 
-**2. Launch the game once through Steam, then quit.** This lets BepInEx create its `config` and
-`plugins` folders and write a first `LogOutput.log`.
-
-**3. Install the plugin.** Download the latest release and copy its contents into:
-
-```
-Surgeon Simulator 2\BepInEx\plugins\SS2Revive\
-```
-
-You want `SS2Revive.dll`, `SS2Revive_Data.dll` and the `newsfeed` folder, all in that one folder.
-Both DLLs must sit side by side, because BepInEx resolves a plugin's dependencies from the folder
-the plugin is in.
-
-**4. Launch the game.** To confirm it loaded, open `BepInEx\LogOutput.log` and look for lines
-tagged `[Info   :SS2 Revive]`.
+---
 
 ## Uninstall
 
-Delete `BepInEx\plugins\SS2Revive\` to remove the mod. To take BepInEx out as well, delete
-`winhttp.dll`, `doorstop_config.ini`, `.doorstop_version` and the `BepInEx` folder.
+- **Mod only:** delete `BepInEx\plugins\SS2Revive\`
+- **Mod + BepInEx:** also delete `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and the `BepInEx` folder
 
-Nothing in the game's own files is ever modified, so a Steam file verification will not undo any
-of this and will not complain about it either.
+Nothing in the game's own files is ever modified — a Steam file verification won't undo this and won't complain about it either.
 
-## Reporting a bug
+---
 
-Open an issue and attach `Surgeon Simulator 2\BepInEx\LogOutput.log` from a run where the problem
-happened. Almost nothing here can be diagnosed without it. Pressing F9 in game writes a state dump
-to that same log, which is worth doing for anything involving parties, progression or cosmetics.
+## Reporting a Bug
 
-The log includes your SteamID64. It identifies your Steam profile and cannot be used to sign in as
-you, but replace the digits if you would rather not have it public.
+- Open an issue and attach `Surgeon Simulator 2\BepInEx\LogOutput.log` from the run where it happened. Almost nothing can be diagnosed without it.
+- Press **F9** in-game to write a state dump to that same log — do this for anything involving parties, progression, or cosmetics.
+- The log includes your **SteamID64** (identifies your profile, can't be used to sign in as you). Redact it if you'd rather not have it public.
 
-## Where your progress is saved
+---
+
+## Where Your Progress Is Saved
 
 ```
 %LOCALAPPDATA%\Bossa Studios\Surgeon Simulator 2\SS2Revive\progress.json
 ```
 
-That sits beside the folders the game already writes to, and outside both the game directory and
-the BepInEx directory, so verifying game files or reinstalling the mod cannot delete it. It is
-plain JSON. Set `SaveDirectory` in the config if you want it somewhere else.
+- Sits outside both the game and BepInEx directories, so verifying game files or reinstalling the mod can't delete it
+- Plain JSON — override the location with `SaveDirectory` in the config
+- Each save replaces the file in one atomic step and keeps the previous version as `progress.json.bak` — a power loss mid-write costs nothing. If `progress.json` gets damaged, delete it and rename `.bak` over it
+- Creation Mode levels live in the `levels` folder next to it, one folder per level (metadata + revisions as readable JSON). Copy the folder to move a level to another machine
 
-Each save replaces the file in one step and keeps the copy it displaced as `progress.json.bak`, so
-losing power mid-write costs you nothing. If `progress.json` is ever damaged, delete it and rename
-the `.bak` over it.
-
-Levels you build in Creation Mode go in the `levels` folder next to it, one folder per level, each
-holding the level's metadata as readable JSON alongside its saved revisions. Copying a level to
-another machine means copying its folder.
+---
 
 ## Configuration
 
-The config file appears after the first run at `BepInEx\config\dev.ss2revive.core.cfg`. The
-defaults are meant to be the right answer, but the ones worth knowing about:
+Config file appears after first run at `BepInEx\config\dev.ss2revive.core.cfg`. Defaults are the intended experience — the ones worth knowing about:
 
 | Setting | Default | What it does |
 |---|---|---|
-| `Bypass.ConnectionCheck` | `true` | Skips asking the shut-down server for permission to start. Turning this off on 1.3.7 or later leaves you stuck at the "requires an active internet connection" box. |
-| `Backend.Mode` | `Local` | Where the game's dead HTTP calls get answered. `Local` answers them in process, needing nothing running. `Off` is diagnostic-only: it disables progression, challenges and cosmetics rather than restoring them. |
-| `Backend.GrantAllCosmetics` | `true` | Unlocks every cosmetic set. Set to `false` to earn them through the reward track instead. |
-| `Backend.SaveDirectory` | *(empty)* | Overrides where `progress.json` and your levels are written. |
-| `CreationMode.Enabled` | `true` | Saves levels you build to this machine. Turning it off puts Creation Mode back to loading into a black screen, because the game will not open a new level until it has uploaded it. |
-| `FreeForAll.Enabled` | `true` | Fills the Free-for-all queue from the levels on this machine. Bossa served that queue from published community levels, so without this it comes back empty and the mode drops you straight back into the lobby. |
-| `FreeForAll.IncludeGameLevels` | `true` | Lets Free-for-all fall back on the levels that ship with the game when your own library has nothing that fits the party. Those are the campaign levels — no free-for-all level ships with the game. |
-| `Party.SteamP2PTransport` | `true` | Sends gameplay traffic over Steam peer to peer. |
+| `Bypass.ConnectionCheck` | `true` | Skips asking the shut-down server for permission to start. Disabling this on 1.3.7+ leaves you stuck at the "requires an active internet connection" box. |
+| `Backend.Mode` | `Local` | Where the game's dead HTTP calls get answered. `Local` answers in-process. `Off` is diagnostic-only — disables progression/challenges/cosmetics rather than restoring them. |
+| `Backend.GrantAllCosmetics` | `true` | Unlocks every cosmetic set. Set `false` to earn them via the reward track. |
+| `Backend.SaveDirectory` | *(empty)* | Overrides where `progress.json` and levels are written. |
+| `CreationMode.Enabled` | `true` | Saves built levels to this machine. Off = Creation Mode loads into a black screen (game won't open a level until it's "uploaded"). |
+| `FreeForAll.Enabled` | `true` | Fills the Free-for-all queue from levels on this machine. Off = empty queue (Bossa served this from published community levels). |
+| `FreeForAll.IncludeGameLevels` | `true` | Lets Free-for-all fall back to campaign levels when your library has nothing that fits. No FFA level ships with the game. |
+| `Party.SteamP2PTransport` | `true` | Sends gameplay traffic over Steam peer-to-peer. |
 | `Party.InviteKey` | `F10` | Opens the Steam invite overlay. |
-| `Party.ShareLevelOverSteam` | `true` | Publishes your season level to lobby members and friends. |
+| `Party.ShareLevelOverSteam` | `true` | Publishes your season level to lobby members/friends. |
 | `NewsFeed.Enabled` | `true` | Points the main menu tiles at the local feed. |
 | `Diagnostics.ProbeKey` | `F9` | Dumps current state to the log. |
-| `Diagnostics.Verbose` | `true` | Include live session and patient state in that dump. Leave it on if you are going to attach the log to a bug report. |
+| `Diagnostics.Verbose` | `true` | Includes live session/patient state in that dump — leave on for bug reports. |
 
+---
 
-## Editing the news feed
+## Editing the News Feed
 
-The three tiles on the main menu are read from `BepInEx\plugins\SS2Revive\newsfeed\NewsFeed.json`.
-Edit it and restart the game. Each tile takes a title, a subtitle, an image filename and an
-optional `ClickUrl` that opens when the tile is clicked. Images go in `newsfeed\images\` and should
-be 512x289 PNG.
+Edit `BepInEx\plugins\SS2Revive\newsfeed\NewsFeed.json` and restart the game.
 
-The game's own tile artwork is copied in the first time the mod runs, from your installation, so
-the tiles are never blank to start with. Those images belong to Bossa and are not distributed here.
+- Each tile: title, subtitle, image filename, optional `ClickUrl`
+- Images go in `newsfeed\images\`, **512×289 PNG**
+- The game's own artwork is copied in on first run, so tiles are never blank to start (those images belong to Bossa and aren't distributed here)
+- Building from source? Edit `assets\newsfeed\NewsFeed.json` instead — see [BUILDING.md](BUILDING.md)
 
-If you are building from source, edit `assets\newsfeed\NewsFeed.json` instead - see
-[BUILDING.md](BUILDING.md).
+---
 
-## Building from source
+## Building From Source
 
-Building, packaging a release, and the repo layout are covered in [BUILDING.md](BUILDING.md).
+Covered in [BUILDING.md](BUILDING.md).
+
+---
 
 ## Disclaimer
 
-SS2 Revive is an unofficial, non-commercial fan modification. It is not affiliated with,
-endorsed by, sponsored by or connected to Bossa Studios, Curve Games, or anyone else involved in
-making or publishing Surgeon Simulator 2. All trademarks and copyrights belong to their respective
-owners.
+SS2 Revive is an unofficial, non-commercial fan modification. It is not affiliated with, endorsed by, sponsored by, or connected to Bossa Studios, Curve Games, or anyone else involved in making or publishing Surgeon Simulator 2. All trademarks and copyrights belong to their respective owners.
 
-The repository contains no game code and no game assets. The mod reads data from the copy of the
-game you already own, on your own machine, and modifies nothing the game installed. It exists so
-that a game people paid for keeps working after its servers were switched off.
+The repository contains no game code and no game assets. The mod reads data from the copy of the game you already own, on your own machine, and modifies nothing the game installed. It exists so that a game people paid for keeps working after its servers were switched off.
