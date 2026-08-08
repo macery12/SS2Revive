@@ -34,6 +34,12 @@ namespace SS2Revive
             if (Plugin.DisableVoip.Value)
                 ApplyVoipDisable(harmony);
 
+            // Independent of Creation Mode and of level sharing on purpose. Levels arrive from
+            // other machines through the party as well - the host's level is pushed to every peer -
+            // so the reader wants bounding whether or not this player ever imports a file.
+            if (Plugin.HardenLevelReader.Value)
+                LevelFormatGuard.Apply(harmony);
+
             if (Plugin.NewsFeedEnabled.Value)
                 ApplyNewsFeed(harmony);
 
@@ -68,9 +74,24 @@ namespace SS2Revive
             {
                 UgcBackend.Initialise(Plugin.SaveDirectory.Value);
                 if (UgcBackend.Available)
+                {
                     UgcPatches.Apply(harmony);
+
+                    // After the library, because export and import are both operations on it and
+                    // there is nothing to share without one.
+                    if (Plugin.LevelSharingEnabled.Value)
+                    {
+                        LevelSharing.Initialise(Plugin.SaveDirectory.Value);
+                        if (LevelSharing.Available)
+                            SharingPatches.Apply(harmony);
+                        else
+                            Report.Add("FAIL Level sharing -> the export and import folders could not be opened");
+                    }
+                }
                 else
+                {
                     Report.Add("FAIL Creation Mode -> the level library could not be opened");
+                }
             }
 
             // After the level library, because that is where the levels worth queueing come from.

@@ -1,0 +1,73 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ss2revive-community-api-production",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-08",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "community.m12labs.net",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "production",
+    "ALLOW_MOCK_AUTH": "false",
+    "AUTH_ISSUER": "urn:ss2revive:community:production",
+    "AUTH_AUDIENCE": "ss2revive-community-client",
+    "MOCK_STEAM_ID64": "",
+    "PUBLIC_ORIGIN": "https://community.m12labs.net",
+    "DOWNLOAD_DAILY_BYTES": "2147483648",
+    "DOWNLOAD_CONCURRENCY": "3"
+  },
+  "secrets": {
+    "required": ["AUTH_SIGNING_SECRET"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ss2revive-community-production",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MAP_BUCKET",
+      "bucket_name": "ss2revive-community-production"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "VALIDATION_QUEUE",
+        "queue": "ss2revive-validation-production"
+      }
+    ]
+  },
+  "ratelimits": [
+    {
+      "name": "AUTH_RATE_LIMITER",
+      "namespace_id": "1101",
+      "simple": { "limit": 10, "period": 60 }
+    },
+    {
+      "name": "API_RATE_LIMITER",
+      "namespace_id": "1102",
+      "simple": { "limit": 120, "period": 60 }
+    },
+    {
+      "name": "DOWNLOAD_RATE_LIMITER",
+      "namespace_id": "1103",
+      "simple": { "limit": 30, "period": 60 }
+    }
+  ],
+  "triggers": {
+    "crons": ["17 * * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1
+  }
+}

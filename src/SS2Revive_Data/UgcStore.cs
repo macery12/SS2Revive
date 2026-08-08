@@ -89,6 +89,13 @@ namespace SS2ReviveData
         public long UsedTimes;
         public int Rating;
         public int RatingCount;
+        /// <summary>
+        /// True when this level was installed from a bundle rather than authored in this library.
+        /// The game has no equivalent field, but the distinction matters to the client UI: an
+        /// installed level may be updated or removed, while an authored level must never be
+        /// overwritten just because a file arrives with the same id.
+        /// </summary>
+        public bool IsImported;
         public string ThumbnailKey = string.Empty;
         public Json Configurations;
         public Json Validations;
@@ -143,6 +150,7 @@ namespace SS2ReviveData
                 .Add("usedTimes", UsedTimes)
                 .Add("rating", Rating)
                 .Add("ratingCount", RatingCount)
+                .Add("imported", IsImported)
                 .Add("thumbnailKey", ThumbnailKey)
                 .Add("configurations", Configurations ?? Json.Array())
                 .Add("validations", Validations ?? Json.Array())
@@ -155,14 +163,17 @@ namespace SS2ReviveData
             var record = new UgcLevelRecord
             {
                 Id = value["id"].AsStringOr(string.Empty),
-                Title = value["title"].AsStringOr(string.Empty),
-                Description = value["description"].AsStringOr(string.Empty),
+                Title = UgcStore.BoundText(value["title"].AsStringOr(string.Empty),
+                                  LevelBundle.MaxTitleCharacters),
+                Description = UgcStore.BoundText(value["description"].AsStringOr(string.Empty),
+                                        LevelBundle.MaxDescriptionCharacters),
                 Status = value["status"].AsStringOr(UgcStore.StatusDraft),
                 CreatedAtMs = value["createdAt"].AsLongOr(0),
                 UpdatedAtMs = value["updatedAt"].AsLongOr(0),
                 UsedTimes = value["usedTimes"].AsLongOr(0),
                 Rating = value["rating"].AsIntOr(0),
                 RatingCount = value["ratingCount"].AsIntOr(0),
+                IsImported = value["imported"].AsBoolOr(false),
                 ThumbnailKey = value["thumbnailKey"].AsStringOr(string.Empty),
                 Configurations = value["configurations"],
                 Validations = value["validations"],
@@ -171,25 +182,43 @@ namespace SS2ReviveData
             var creators = value["creators"];
             if (creators != null)
             {
-                foreach (var item in creators.Items) record.CreatorIds.Add(item.AsString());
+                foreach (var item in creators.Items)
+                {
+                    if (record.CreatorIds.Count >= LevelBundle.MaxCreators) break;
+                    record.CreatorIds.Add(UgcStore.BoundText(item.AsString(),
+                        LevelBundle.MaxMetadataItemCharacters));
+                }
             }
 
             var tags = value["tags"];
             if (tags != null)
             {
-                foreach (var item in tags.Items) record.Tags.Add(item.AsString());
+                foreach (var item in tags.Items)
+                {
+                    if (record.Tags.Count >= LevelBundle.MaxTags) break;
+                    record.Tags.Add(UgcStore.BoundText(item.AsString(),
+                        LevelBundle.MaxMetadataItemCharacters));
+                }
             }
 
             var contents = value["contents"];
             if (contents != null)
             {
-                foreach (var item in contents.Items) record.Contents.Add(UgcContentRecord.FromStorage(item));
+                foreach (var item in contents.Items)
+                {
+                    if (record.Contents.Count >= 64) break;
+                    record.Contents.Add(UgcContentRecord.FromStorage(item));
+                }
             }
 
             var images = value["images"];
             if (images != null)
             {
-                foreach (var item in images.Items) record.Images.Add(UgcImageRecord.FromStorage(item));
+                foreach (var item in images.Items)
+                {
+                    if (record.Images.Count >= 64) break;
+                    record.Images.Add(UgcImageRecord.FromStorage(item));
+                }
             }
 
             return record;
@@ -208,6 +237,17 @@ namespace SS2ReviveData
         public int PageIndex;
         public int ResultsPerPage = UgcStore.DefaultResultsPerPage;
         public bool AnyStatus;
+    }
+
+    /// <summary>The result of installing a portable level bundle into a library.</summary>
+    public enum UgcInstallOutcome
+    {
+        Added,
+        Updated,
+        Current,
+        Older,
+        Conflict,
+        Failed,
     }
 
     /// <summary>
@@ -247,7 +287,7 @@ namespace SS2ReviveData
         /// quietly loses its configurations. Files predating this field read as 1, which is what
         /// they are.
         /// </summary>
-        public const int CurrentFormatVersion = 1;
+        public const int CurrentFormatVersion = 2;
 
         /// <summary>Marks a key as ours. The game hands keys it does not understand straight to
         /// S3, so anything we mint has to be recognisable on sight.</summary>
@@ -352,8 +392,14 @@ namespace SS2ReviveData
             if (string.Equals(level.Status, StatusArchived, StringComparison.OrdinalIgnoreCase))
                 return false;
 
-            if (!string.IsNullOrEmpty(query.CreatorId) && !level.CreatorIds.Contains(query.CreatorId))
+            // Claimed attribution in an imported bundle is display-only. It must never make a
+            // downloaded map appear in the local player's authoring list, even if a hostile
+            // manifest names that player's id as a creator.
+            if (!string.IsNullOrEmpty(query.CreatorId)
+                && (level.IsImported || !level.CreatorIds.Contains(query.CreatorId)))
+            {
                 return false;
+            }
 
             if (!string.IsNullOrEmpty(query.Tag) && !level.Tags.Contains(query.Tag))
                 return false;
@@ -425,6 +471,204 @@ namespace SS2ReviveData
             return level;
         }
 
+        /// <summary>
+        /// Takes in a level that was built on somebody else's machine, keeping the id it arrived
+        /// with.
+        ///
+        /// The id is the whole reason this is not just <see cref="Create"/>. A level's id is what
+        /// its share code encodes, so a level that came in under a fresh id would answer to a
+        /// different code than the one its author posted - and the code would then mean something
+        /// different on every machine that imported it, which is the one thing it cannot do.
+        ///
+        /// It arrives published, and credited to whoever made it. Neither is cosmetic: published is
+        /// what puts it in Discover and in the free-for-all pool, and the original creator id is
+        /// what keeps it out of the importer's own Create screen, where editing and re-publishing
+        /// somebody else's level would fork the code.
+        ///
+        /// The id is required to be a GUID by the caller before it gets here, which is also what
+        /// makes it safe to use as a directory name.
+        /// </summary>
+        public UgcLevelRecord Install(UgcLevelRecord prototype, int clientVersion,
+                                      int contentVersion, long exportedAtMs, byte[] content,
+                                      byte[] contentImage, byte[] thumbnail,
+                                      out UgcInstallOutcome outcome, out string error)
+        {
+            outcome = UgcInstallOutcome.Failed;
+            error = null;
+
+            if (prototype == null || content == null || content.Length == 0)
+            {
+                error = "There is nothing to import.";
+                return null;
+            }
+
+            System.Guid parsed;
+            if (string.IsNullOrEmpty(prototype.Id) || !System.Guid.TryParse(prototype.Id, out parsed))
+            {
+                error = "The level does not carry a valid id.";
+                return null;
+            }
+
+            prototype.Id = parsed.ToString();
+
+            lock (_gate)
+            {
+                UgcLevelRecord existing;
+                if (_levels.TryGetValue(prototype.Id, out existing))
+                {
+                    if (!existing.IsImported)
+                    {
+                        outcome = UgcInstallOutcome.Conflict;
+                        error = "A level you authored already uses this id. It was left untouched.";
+                        return existing;
+                    }
+
+                    var latest = existing.LatestContent();
+                    var installedVersion = latest == null ? 0 : latest.ContentVersion;
+                    var incomingVersion = contentVersion > 0 ? contentVersion : 1;
+
+                    if (incomingVersion < installedVersion)
+                    {
+                        outcome = UgcInstallOutcome.Older;
+                        return existing;
+                    }
+
+                    if (incomingVersion == installedVersion)
+                    {
+                        var installedBytes = latest == null ? null : ReadKey(latest.Key);
+                        if (BytesEqual(installedBytes, content))
+                        {
+                            outcome = UgcInstallOutcome.Current;
+                            return existing;
+                        }
+
+                        outcome = UgcInstallOutcome.Conflict;
+                        error = "This file claims the same revision as the installed level but "
+                                + "contains different data. It was left untouched.";
+                        return existing;
+                    }
+
+                    // Stage the whole update on a deep copy. The live record and its persisted
+                    // revision history are not changed until the replacement metadata is durable.
+                    var replacement = UgcLevelRecord.FromStorage(existing.ToStorage());
+                    replacement.Title = prototype.Title ?? string.Empty;
+                    replacement.Description = prototype.Description ?? string.Empty;
+                    replacement.CreatorIds = new List<string>(prototype.CreatorIds ?? new List<string>());
+                    replacement.Tags = new List<string>(prototype.Tags ?? new List<string>());
+                    replacement.Configurations = prototype.Configurations;
+                    replacement.Validations = prototype.Validations;
+                    replacement.Status = StatusPublished;
+                    replacement.IsImported = true;
+
+                    var updated = AddContentLocked(replacement, clientVersion, content, contentImage,
+                                                   false, incomingVersion, exportedAtMs, false);
+                    if (updated == null)
+                    {
+                        error = "The updated level data could not be written to disk.";
+                        return null;
+                    }
+
+                    UgcImageRecord newThumbnail = null;
+                    if (thumbnail != null)
+                        newThumbnail = AddImageLocked(replacement, thumbnail,
+                                                      FirstOr(replacement.CreatorIds), true);
+
+                    // Remove old records from the staged metadata first, but leave their blobs in
+                    // place until that metadata has been committed. A crash can leak an unreferenced
+                    // blob; it must never leave durable metadata pointing at a blob already deleted.
+                    var pruned = PruneContentsLocked(replacement, false);
+
+                    if (!SaveLocked(replacement))
+                    {
+                        DeleteBlob(updated.Key);
+                        DeleteBlob(updated.ImageKey);
+                        if (newThumbnail != null) DeleteBlob(newThumbnail.Key);
+                        outcome = UgcInstallOutcome.Failed;
+                        error = "The updated level metadata could not be saved.";
+                        return null;
+                    }
+
+                    _levels[replacement.Id] = replacement;
+                    for (var i = 0; i < pruned.Count; i++)
+                    {
+                        DeleteBlob(pruned[i].Key);
+                        DeleteBlob(pruned[i].ImageKey);
+                    }
+                    outcome = UgcInstallOutcome.Updated;
+                    return replacement;
+                }
+
+                prototype.Status = StatusPublished;
+                prototype.IsImported = true;
+                if (prototype.CreatedAtMs <= 0) prototype.CreatedAtMs = NowMs();
+                prototype.UpdatedAtMs = NowMs();
+
+                // Whatever the sending machine recorded about how often it was played, and how its
+                // author rated their own level, is theirs and not a fact about this library.
+                prototype.UsedTimes = 0;
+                prototype.Rating = 0;
+                prototype.RatingCount = 0;
+                prototype.ThumbnailKey = string.Empty;
+                prototype.Contents = new List<UgcContentRecord>();
+                prototype.Images = new List<UgcImageRecord>();
+
+                try
+                {
+                    Directory.CreateDirectory(LevelDirectory(prototype.Id));
+                }
+                catch (Exception ex)
+                {
+                    error = "Could not create a folder for it: " + ex.Message;
+                    return null;
+                }
+
+                // Registered before the blobs are written, because WriteBlob resolves keys through
+                // the store root and the record has to be reachable for a later read either way.
+                _levels[prototype.Id] = prototype;
+
+                var incoming = contentVersion > 0 ? contentVersion : 1;
+                if (AddContentLocked(prototype, clientVersion, content, contentImage, false,
+                                     incoming) == null)
+                {
+                    _levels.Remove(prototype.Id);
+                    error = "Its level data could not be written to disk.";
+                    return null;
+                }
+
+                if (thumbnail != null)
+                    AddImageLocked(prototype, thumbnail, FirstOr(prototype.CreatorIds), true);
+
+                if (!SaveLocked(prototype))
+                {
+                    _levels.Remove(prototype.Id);
+                    CleanupFailedInstall(prototype.Id);
+                    outcome = UgcInstallOutcome.Failed;
+                    error = "The level metadata could not be saved.";
+                    return null;
+                }
+                outcome = UgcInstallOutcome.Added;
+                return prototype;
+            }
+        }
+
+        /// <summary>
+        /// Compatibility wrapper for callers that predate version-aware bundle installation.
+        /// New code should use <see cref="Install"/> so re-importing can update in place.
+        /// </summary>
+        public UgcLevelRecord Adopt(UgcLevelRecord prototype, int clientVersion, byte[] content,
+                                    byte[] contentImage, byte[] thumbnail, out string error)
+        {
+            UgcInstallOutcome outcome;
+            var level = Install(prototype, clientVersion, 1, 0, content, contentImage, thumbnail,
+                                out outcome, out error);
+            if (outcome == UgcInstallOutcome.Current)
+            {
+                error = "already-here";
+                return null;
+            }
+            return outcome == UgcInstallOutcome.Added ? level : null;
+        }
+
         public UgcContentRecord AddContent(UgcLevelRecord level, int clientVersion,
                                            byte[] content, byte[] image, bool isAutoSave)
         {
@@ -486,18 +730,38 @@ namespace SS2ReviveData
             if (string.IsNullOrEmpty(assetId)) return false;
             lock (_gate)
             {
-                if (!_levels.Remove(assetId)) return false;
+                if (!_levels.ContainsKey(assetId)) return false;
 
                 try
                 {
                     var directory = LevelDirectory(assetId);
-                    if (Directory.Exists(directory)) Directory.Delete(directory, true);
+                    if (Directory.Exists(directory))
+                    {
+                        // Renaming inside the same parent is the durable delete. If cleanup is
+                        // interrupted or a file is locked afterwards, Load ignores the tombstone
+                        // and the map does not reappear on the next launch.
+                        var tombstone = Path.Combine(_root, ".deleted-" + assetId + "-"
+                                                    + System.Guid.NewGuid().ToString("N"));
+                        Directory.Move(directory, tombstone);
+                        _levels.Remove(assetId);
+
+                        try { Directory.Delete(tombstone, true); }
+                        catch (Exception cleanup)
+                        {
+                            _warn("Level " + assetId + " was removed, but its tombstone could not "
+                                  + "be cleaned up yet: " + cleanup.Message);
+                        }
+                        return true;
+                    }
+
+                    _levels.Remove(assetId);
+                    return true;
                 }
                 catch (Exception ex)
                 {
                     _warn("Could not delete level folder for " + assetId + ": " + ex.Message);
+                    return false;
                 }
-                return true;
             }
         }
 
@@ -559,16 +823,18 @@ namespace SS2ReviveData
         // -------------------------------------------------------------- internals
 
         private UgcContentRecord AddContentLocked(UgcLevelRecord level, int clientVersion,
-                                                  byte[] content, byte[] image, bool isAutoSave)
+                                                   byte[] content, byte[] image, bool isAutoSave,
+                                                   int contentVersion = 0, long createdAtMs = 0,
+                                                   bool prune = true)
         {
             var id = System.Guid.NewGuid().ToString();
             var record = new UgcContentRecord
             {
                 Id = id,
                 Key = KeyPrefix + level.Id + "/content/" + id + ".bin",
-                CreatedAtMs = NowMs(),
+                CreatedAtMs = createdAtMs > 0 ? createdAtMs : NowMs(),
                 ClientVersion = clientVersion,
-                ContentVersion = level.NextContentVersion(),
+                ContentVersion = contentVersion > 0 ? contentVersion : level.NextContentVersion(),
                 IsAutoSave = isAutoSave,
             };
 
@@ -585,9 +851,26 @@ namespace SS2ReviveData
             }
 
             level.Contents.Add(record);
-            PruneContentsLocked(level);
+            if (prune) PruneContentsLocked(level);
             Touch(level);
             return record;
+        }
+
+        internal static string BoundText(string value, int maximum)
+        {
+            if (string.IsNullOrEmpty(value)) return string.Empty;
+            return value.Length <= maximum ? value : value.Substring(0, maximum);
+        }
+
+        private static bool BytesEqual(byte[] left, byte[] right)
+        {
+            if (left == null || right == null) return left == right;
+            if (left.Length != right.Length) return false;
+            for (var i = 0; i < left.Length; i++)
+            {
+                if (left[i] != right[i]) return false;
+            }
+            return true;
         }
 
         private UgcImageRecord AddImageLocked(UgcLevelRecord level, byte[] image, string creatorId, bool isThumbnail)
@@ -621,9 +904,11 @@ namespace SS2ReviveData
         /// half hour of autosaves" means going back to the last time the player pressed save, and a
         /// prune that took that away would be the one deletion nobody could recover from.
         /// </summary>
-        private void PruneContentsLocked(UgcLevelRecord level)
+        private List<UgcContentRecord> PruneContentsLocked(UgcLevelRecord level,
+                                                            bool deleteBlobs = true)
         {
-            if (level.Contents.Count <= MaxContentsPerLevel) return;
+            var removed = new List<UgcContentRecord>();
+            if (level.Contents.Count <= MaxContentsPerLevel) return removed;
 
             var newest = level.LatestContent();
 
@@ -646,9 +931,28 @@ namespace SS2ReviveData
                 var candidate = ordered[i];
                 if (candidate == newest || candidate == newestManual) continue;
 
-                DeleteBlob(candidate.Key);
-                DeleteBlob(candidate.ImageKey);
                 level.Contents.Remove(candidate);
+                removed.Add(candidate);
+                if (deleteBlobs)
+                {
+                    DeleteBlob(candidate.Key);
+                    DeleteBlob(candidate.ImageKey);
+                }
+            }
+
+            return removed;
+        }
+
+        private void CleanupFailedInstall(string levelId)
+        {
+            try
+            {
+                var directory = LevelDirectory(levelId);
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
+            catch (Exception ex)
+            {
+                _warn("Could not clean up the failed install for " + levelId + ": " + ex.Message);
             }
         }
 
@@ -657,7 +961,25 @@ namespace SS2ReviveData
         private static string FirstOr(List<string> values) =>
             values != null && values.Count > 0 ? values[0] : string.Empty;
 
-        private string LevelDirectory(string assetId) => Path.Combine(_root, assetId);
+        private string LevelDirectory(string assetId)
+        {
+            System.Guid parsed;
+            if (string.IsNullOrEmpty(assetId) || !System.Guid.TryParse(assetId, out parsed)
+                || !string.Equals(parsed.ToString(), assetId, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ArgumentException("A level id must be a canonical GUID.", "assetId");
+            }
+
+            var root = Path.GetFullPath(_root);
+            if (!root.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal))
+                root += Path.DirectorySeparatorChar;
+
+            var candidate = Path.GetFullPath(Path.Combine(root, parsed.ToString()));
+            if (!candidate.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The level folder escapes the library root.");
+
+            return candidate;
+        }
 
         private bool WriteBlob(string key, byte[] data)
         {
@@ -695,7 +1017,7 @@ namespace SS2ReviveData
             }
         }
 
-        private void SaveLocked(UgcLevelRecord level)
+        private bool SaveLocked(UgcLevelRecord level)
         {
             var file = Path.Combine(LevelDirectory(level.Id), "asset.json");
             try
@@ -704,10 +1026,12 @@ namespace SS2ReviveData
                 level.ToStorage().Write(builder);
 
                 AtomicFile.WriteAllText(file, builder.ToString(), new UTF8Encoding(false));
+                return true;
             }
             catch (Exception ex)
             {
                 _warn("Could not save level " + level.Id + ": " + ex.Message);
+                return false;
             }
         }
 
@@ -731,7 +1055,20 @@ namespace SS2ReviveData
 
                 try
                 {
-                    var parsed = Json.TryParse(File.ReadAllText(file, Encoding.UTF8));
+                    if (new FileInfo(file).Length > 2 * 1024 * 1024)
+                    {
+                        _warn("Skipping oversized level metadata at " + file);
+                        continue;
+                    }
+
+                    var jsonText = File.ReadAllText(file, Encoding.UTF8);
+                    if (!HasReasonableJsonDepth(jsonText))
+                    {
+                        _warn("Skipping deeply nested level metadata at " + file);
+                        continue;
+                    }
+
+                    var parsed = Json.TryParse(jsonText);
                     if (parsed == null)
                     {
                         _warn("Skipping unreadable level metadata at " + file);
@@ -750,12 +1087,32 @@ namespace SS2ReviveData
                     }
 
                     var level = UgcLevelRecord.FromStorage(parsed);
+                    var folderId = Path.GetFileName(directories[i]);
                     if (string.IsNullOrEmpty(level.Id))
                     {
                         // Recoverable: the folder is named after the asset, so the id is not lost.
-                        level.Id = Path.GetFileName(directories[i]);
+                        level.Id = folderId;
                     }
 
+                    System.Guid parsedId, parsedFolder;
+                    if (!System.Guid.TryParse(level.Id, out parsedId)
+                        || !System.Guid.TryParse(folderId, out parsedFolder)
+                        || parsedId != parsedFolder)
+                    {
+                        _warn("Skipping the level at " + directories[i]
+                              + ": its id is not the canonical GUID naming its folder.");
+                        continue;
+                    }
+
+                    level.Id = parsedId.ToString();
+                    var now = NowMs();
+                    if (level.CreatedAtMs < 0 || level.CreatedAtMs > now + 24L * 60 * 60 * 1000)
+                        level.CreatedAtMs = now;
+                    if (level.UpdatedAtMs < level.CreatedAtMs
+                        || level.UpdatedAtMs > now + 24L * 60 * 60 * 1000)
+                    {
+                        level.UpdatedAtMs = now;
+                    }
                     _levels[level.Id] = level;
                 }
                 catch (Exception ex)
@@ -763,6 +1120,34 @@ namespace SS2ReviveData
                     _warn("Skipping level at " + directories[i] + ": " + ex.Message);
                 }
             }
+        }
+
+        private static bool HasReasonableJsonDepth(string text)
+        {
+            var depth = 0;
+            var quoted = false;
+            var escaped = false;
+            for (var i = 0; i < text.Length; i++)
+            {
+                var c = text[i];
+                if (quoted)
+                {
+                    if (escaped) escaped = false;
+                    else if (c == '\\') escaped = true;
+                    else if (c == '"') quoted = false;
+                    continue;
+                }
+                if (c == '"') quoted = true;
+                else if (c == '{' || c == '[')
+                {
+                    if (++depth > 32) return false;
+                }
+                else if (c == '}' || c == ']')
+                {
+                    if (--depth < 0) return false;
+                }
+            }
+            return depth == 0 && !quoted;
         }
 
         /// <summary>Formats a count for the log without pulling in a culture-sensitive path.</summary>

@@ -1,0 +1,14 @@
+{
+  "name": "ss2revive-backend",
+  "private": true,
+  "packageManager": "pnpm@11.16.0",
+  "scripts": {
+    "build": "pnpm --filter @ss2revive/community-api build",
+    "check": "pnpm --filter @ss2revive/community-api check",
+    "test": "pnpm --filter @ss2revive/community-api test",
+    "test:coverage": "pnpm --filter @ss2revive/community-api test:coverage",
+    "security:secrets": "node scripts/secret-scan.mjs",
+    "security:audit": "pnpm audit --audit-level high",
+    "security": "pnpm run security:secrets && pnpm run security:audit"
+  }
+}

@@ -36,6 +36,8 @@ namespace SS2ReviveData.Tests
                 RunChallengeRolloverTests(scratch);
                 RunDurabilityTests(scratch);
                 RunUgcStoreTests(scratch);
+                RunLevelSharingTests(scratch);
+                RunCommunityCatalogTests();
             }
             catch (Exception ex)
             {
@@ -937,6 +939,389 @@ namespace SS2ReviveData.Tests
             Check("and it is gone from the index", reopened.Get(level.Id) == null);
             Check("and its blobs are gone too", reopened.ReadKey(contentKey) == null);
             Check("deleting it twice is not an error", !reopened.Delete(level.Id));
+        }
+
+        // ------------------------------------------------------------ level sharing
+
+        private static void RunLevelSharingTests(string scratch)
+        {
+            Section("share codes");
+
+            // Fixed vector rather than a round trip alone. This encoding has to stay identical to
+            // UGCService2's, because the game's own search box decodes what we encode - and this
+            // particular id produces a '/' in its base64, which is the character that has to become
+            // an underscore.
+            const string knownId = "1a658233-92c5-4b63-87fc-4740c855730b";
+            const string knownCode = "M4JlGsWSY0uH_EdAyFVzCw";
+
+            Check("a level id encodes to the code the game would show",
+                LevelCode.FromLevelId(knownId) == knownCode);
+
+            string decoded;
+            Check("and that code decodes back to the id",
+                LevelCode.TryToLevelId(knownCode, out decoded) && decoded == knownId);
+
+            Check("codes are always 22 characters", LevelCode.FromLevelId(knownId).Length == LevelCode.Length);
+            Check("a code of the wrong length is refused", !LevelCode.TryToLevelId("tooshort", out decoded));
+            Check("22 characters of nonsense is refused",
+                !LevelCode.TryToLevelId("!!!!!!!!!!!!!!!!!!!!!!", out decoded));
+            Check("an id that is not a guid has no code", LevelCode.FromLevelId("not-a-guid") == string.Empty);
+
+            Section("level bundles");
+
+            var root = Path.Combine(scratch, "sharing");
+            var store = new UgcStore(root);
+
+            // Real levels start with the game's file magic, and the reader refuses anything that
+            // does not - so a bundle test that skipped it would be testing the wrong thing.
+            var content = LevelBytes(29, 4096);
+            var image = GameImageBytes(64);
+            var thumbnail = GameImageBytes(128);
+
+            var level = store.Create("Kidney Trouble", "mind the ribs",
+                new List<string> { PlayerA }, new List<string> { "TEAM_COOP" },
+                29, content, image);
+            store.AddImage(level, thumbnail, PlayerA, true);
+
+            string error;
+            var bundle = LevelBundle.FromLevel(level, store.ReadKey, out error);
+            Check("a level packs into a bundle", bundle != null && error == null);
+
+            Check("the bundle's file name carries the code",
+                bundle.SuggestedFileName() == "Kidney Trouble [" + bundle.Code + "]" + LevelBundle.Extension);
+
+            var packed = bundle.Pack();
+            var read = LevelBundle.Unpack(packed, out error);
+
+            Check("a bundle round trips", read != null && error == null);
+            Check("the id survives, which is what keeps the code stable", read.Id == level.Id);
+            Check("the title survives", read.Title == "Kidney Trouble");
+            Check("the description survives", read.Description == "mind the ribs");
+            Check("the creator survives", read.CreatorIds.Contains(PlayerA));
+            Check("tags survive", read.Tags.Contains("TEAM_COOP"));
+            Check("the client version survives", read.ClientVersion == 29);
+            Check("the level data survives byte for byte", BytesEqual(read.Content, content));
+            Check("the screenshot survives", BytesEqual(read.ContentImage, image));
+            Check("the thumbnail survives", BytesEqual(read.Thumbnail, thumbnail));
+            Check("the code is the same on both sides", read.Code == bundle.Code);
+
+            // Everything below is a file that arrived from somebody else.
+            Check("an empty file is refused", LevelBundle.Unpack(new byte[0], out error) == null);
+            Check("a file that is not a bundle is refused",
+                LevelBundle.Unpack(new byte[64], out error) == null);
+
+            var truncated = new byte[packed.Length / 2];
+            Buffer.BlockCopy(packed, 0, truncated, 0, truncated.Length);
+            Check("a half-downloaded bundle is refused", LevelBundle.Unpack(truncated, out error) == null);
+
+            var tampered = (byte[])packed.Clone();
+            var payloadOffset = FindBytes(tampered, content);
+            if (payloadOffset >= 0) tampered[payloadOffset + 32] ^= 0x5A;
+            Check("a bundle whose level bytes do not match its checksum is refused",
+                payloadOffset >= 0 && LevelBundle.Unpack(tampered, out error) == null);
+
+            // The one number in the format that sizes an allocation. A reader that believed it
+            // would try for two gigabytes on a file of a few kilobytes.
+            var lying = OverstatedEntryLength(packed);
+            Check("an entry claiming to be larger than the file is refused",
+                LevelBundle.Unpack(lying, out error) == null);
+
+            var notALevel = new LevelBundle
+            {
+                Id = level.Id,
+                Title = "Nope",
+                Content = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 },
+            };
+            Check("a bundle whose payload is not a level is refused",
+                LevelBundle.Unpack(notALevel.Pack(), out error) == null);
+
+            var badImages = new LevelBundle
+            {
+                Id = level.Id,
+                Title = "Odd pictures",
+                Content = content,
+                ContentImage = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 },
+                Thumbnail = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 },
+            };
+            var cleaned = LevelBundle.Unpack(badImages.Pack(), out error);
+            Check("a bundle with invalid image envelopes still imports", cleaned != null);
+            Check("but the images are dropped rather than passed on",
+                cleaned.ContentImage == null && cleaned.Thumbnail == null);
+            Check("undefined texture formats are refused",
+                !LevelBundle.IsSafeRawGameImage(16, 16, 0, 256)
+                && !LevelBundle.IsSafeRawGameImage(16, 16, 6, 1024)
+                && !LevelBundle.IsSafeRawGameImage(16, 16, 8, 1024));
+            Check("raw image data must contain its declared texture",
+                LevelBundle.IsSafeRawGameImage(16, 16, 4, 1024)
+                && !LevelBundle.IsSafeRawGameImage(2048, 2048, 4, 16));
+
+            Section("importing");
+
+            var receiving = new UgcStore(Path.Combine(scratch, "receiving"));
+
+            var adopted = receiving.Adopt(Prototype(read), read.ClientVersion, read.Content,
+                                          read.ContentImage, read.Thumbnail, out error);
+
+            Check("a bundle imports into an empty library", adopted != null && error == null);
+            Check("it keeps the id it arrived with", adopted.Id == level.Id);
+            Check("so the author's code finds it here too",
+                LevelCode.TryToLevelId(bundle.Code, out decoded) && receiving.Get(decoded) != null);
+            Check("it arrives published, so it shows in Discover",
+                adopted.Status == UgcStore.StatusPublished);
+            Check("it stays credited to whoever built it", adopted.CreatorIds.Contains(PlayerA));
+            Check("its level data is readable through the store",
+                BytesEqual(receiving.ReadKey(adopted.LatestContent().Key), content));
+            Check("it has a thumbnail to show", !string.IsNullOrEmpty(adopted.ThumbnailKey));
+
+            int pages;
+            var found = receiving.Search(new UgcQuery
+            {
+                Status = UgcStore.StatusPublished,
+                Ids = new List<string> { decoded },
+            }, out pages);
+            Check("a code search finds exactly the imported level",
+                found.Count == 1 && found[0].Id == level.Id);
+
+            var mine = receiving.Search(new UgcQuery
+            {
+                Status = UgcStore.StatusPublished,
+                CreatorId = PlayerB,
+            }, out pages);
+            Check("and it is not listed as the importer's own level", mine.Count == 0);
+
+            Check("importing the same level twice says so rather than duplicating it",
+                receiving.Adopt(Prototype(read), 29, content, null, null, out error) == null
+                && error == "already-here");
+
+            var updatedContent = LevelBytes(29, 6144);
+            UgcInstallOutcome outcome;
+            var updated = receiving.Install(Prototype(read), 29, 2, UgcStore.NowMs(),
+                updatedContent, null, null, out outcome, out error);
+            Check("a newer shared revision updates the installed map in place",
+                updated != null && outcome == UgcInstallOutcome.Updated && updated.Id == level.Id);
+            Check("the newer revision replaces what play will load",
+                updated.LatestContent().ContentVersion == 2
+                && BytesEqual(receiving.ReadKey(updated.LatestContent().Key), updatedContent));
+
+            receiving.Install(Prototype(read), 29, 1, UgcStore.NowMs(), content, null, null,
+                              out outcome, out error);
+            Check("an older shared revision is ignored", outcome == UgcInstallOutcome.Older
+                && receiving.Get(level.Id).LatestContent().ContentVersion == 2);
+
+            receiving.Install(Prototype(read), 29, 2, UgcStore.NowMs(), updatedContent, null, null,
+                              out outcome, out error);
+            Check("reinstalling identical current bytes is idempotent",
+                outcome == UgcInstallOutcome.Current);
+
+            var conflictingContent = LevelBytes(29, 7168);
+            receiving.Install(Prototype(read), 29, 2, UgcStore.NowMs(), conflictingContent,
+                              null, null, out outcome, out error);
+            Check("the same revision with different bytes is refused",
+                outcome == UgcInstallOutcome.Conflict && !string.IsNullOrEmpty(error));
+
+            var forged = Prototype(read);
+            forged.Id = "../../../etc/passwd";
+            Check("an id that is not a guid is refused, because it would be a folder name",
+                receiving.Adopt(forged, 29, content, null, null, out error) == null
+                && error != "already-here");
+
+            var reopened = new UgcStore(Path.Combine(scratch, "receiving"));
+            var survived = reopened.Get(level.Id);
+            Check("imported levels survive a restart", survived != null);
+            Check("with their creator intact", survived != null && survived.CreatorIds.Contains(PlayerA));
+
+            Section("level store containment");
+
+            var containmentRoot = Path.Combine(scratch, "containment");
+            var levelsRoot = Path.Combine(containmentRoot, "levels");
+            var folderId = Guid.NewGuid().ToString();
+            var maliciousFolder = Path.Combine(levelsRoot, folderId);
+            var sentinel = Path.Combine(scratch, "sentinel");
+            Directory.CreateDirectory(maliciousFolder);
+            Directory.CreateDirectory(sentinel);
+            File.WriteAllText(Path.Combine(sentinel, "keep.txt"), "keep");
+            File.WriteAllText(Path.Combine(maliciousFolder, "asset.json"),
+                "{\"version\":1,\"id\":\"../../sentinel\",\"title\":\"bad\"}");
+
+            var warnings = new List<string>();
+            var contained = new UgcStore(containmentRoot, warnings.Add);
+            Check("metadata whose id disagrees with its GUID folder is not loaded",
+                contained.Count == 0 && warnings.Count > 0);
+            Check("and cannot turn map deletion into recursive path traversal",
+                File.Exists(Path.Combine(sentinel, "keep.txt")));
+        }
+
+        private static UgcLevelRecord Prototype(LevelBundle bundle) => new UgcLevelRecord
+        {
+            Id = bundle.Id,
+            Title = bundle.Title,
+            Description = bundle.Description,
+            CreatorIds = new List<string>(bundle.CreatorIds),
+            Tags = new List<string>(bundle.Tags),
+            CreatedAtMs = bundle.CreatedAtMs,
+            Configurations = bundle.Configurations,
+            Validations = bundle.Validations,
+        };
+
+        // ------------------------------------------------------ community catalogue
+
+        private static void RunCommunityCatalogTests()
+        {
+            Section("community catalogue");
+            const string id = "1a658233-92c5-4b63-87fc-4740c855730b";
+            var sha = new string('a', 64);
+            var json = "{\"schemaVersion\":1,\"generatedAtUtc\":\"2026-08-08T00:00:00Z\",\"maps\":[{"
+                + "\"id\":\"" + id + "\",\"code\":\"M4JlGsWSY0uH_EdAyFVzCw\","
+                + "\"revision\":3,\"title\":\"Kidney Trouble\",\"description\":\"Safe & curated\","
+                + "\"creatorIds\":[\"" + PlayerA + "\"],\"tags\":[\"TEAM_COOP\"],"
+                + "\"createdAtMs\":100,\"updatedAtMs\":200,\"clientVersion\":29,"
+                + "\"mapFormatVersion\":29,\"minimumReviveVersion\":\"1.1.0\","
+                + "\"sizeBytes\":4096,\"sha256\":\"" + sha + "\","
+                + "\"bundleKey\":\"maps/kidney-r3.ss2level\","
+                + "\"thumbnailSizeBytes\":1024,\"thumbnailSha256\":\"" + sha + "\","
+                + "\"thumbnailKey\":\"thumbs/kidney-r3.bin\","
+                + "\"configurations\":[{\"numberPlayers\":2}],\"validations\":[]}]}";
+
+            CommunityCatalog catalog;
+            string error;
+            Check("a valid static catalogue parses",
+                CommunityCatalog.TryParse(System.Text.Encoding.UTF8.GetBytes(json), out catalog, out error)
+                && catalog.Entries.Count == 1);
+            var extremeDates = json.Replace("\"createdAtMs\":100,\"updatedAtMs\":200",
+                "\"createdAtMs\":9223372036854775807,\"updatedAtMs\":9223372036854775807");
+            CommunityCatalog dated;
+            Check("hostile timestamps are clamped before game DateTime conversion",
+                CommunityCatalog.TryParse(System.Text.Encoding.UTF8.GetBytes(extremeDates),
+                                          out dated, out error)
+                && dated.Entries.Count == 1
+                && dated.Entries[0].CreatedAtMs <= UgcStore.NowMs() + 24L * 60 * 60 * 1000
+                && dated.Entries[0].UpdatedAtMs <= UgcStore.NowMs() + 24L * 60 * 60 * 1000);
+            Check("relative nested object keys are accepted",
+                CommunityCatalog.IsSafeObjectKey("maps/2026/map.ss2level"));
+            Check("absolute and traversal object keys are refused",
+                !CommunityCatalog.IsSafeObjectKey("https://attacker.invalid/map")
+                && !CommunityCatalog.IsSafeObjectKey("../map.ss2level")
+                && !CommunityCatalog.IsSafeObjectKey("maps/%2e%2e/secret"));
+            Check("a catalogue map is filtered by party size",
+                catalog.Search(new UgcQuery { Status = UgcStore.StatusPublished, PartySize = 2 }).Count == 1
+                && catalog.Search(new UgcQuery { Status = UgcStore.StatusPublished, PartySize = 4 }).Count == 0);
+            Check("remote attribution never grants My Levels ownership",
+                catalog.Search(new UgcQuery { AnyStatus = true, CreatorId = PlayerA }).Count == 0);
+            Check("the current map and mod versions are compatible",
+                CommunityCatalog.CompatibilityError(catalog.Entries[0], "1.1.0") == null);
+            catalog.Entries[0].MinimumReviveVersion = "2.0.0";
+            Check("a newer minimum mod version is rejected with a reason",
+                CommunityCatalog.CompatibilityError(catalog.Entries[0], "1.1.0").Contains("Requires"));
+            catalog.Entries[0].MinimumReviveVersion = "1.0.0";
+            catalog.Entries[0].MapFormatVersion = 30;
+            Check("a future map format is rejected with a reason",
+                CommunityCatalog.CompatibilityError(catalog.Entries[0], "1.1.0").Contains("Map format"));
+
+            var extremeTimestamp = json.Replace("1700000000000", "9223372036854775807");
+            Check("catalogue timestamps are clamped before terminal date conversion",
+                CommunityCatalog.TryParse(System.Text.Encoding.UTF8.GetBytes(extremeTimestamp),
+                                          out catalog, out error)
+                && catalog.Entries[0].CreatedAtMs <= UgcStore.NowMs() + 24L * 60 * 60 * 1000
+                && catalog.Entries[0].UpdatedAtMs <= UgcStore.NowMs() + 24L * 60 * 60 * 1000);
+
+            var oversized = new byte[CommunityCatalog.MaxDocumentBytes + 1];
+            Check("an oversized catalogue is refused before JSON parsing",
+                !CommunityCatalog.TryParse(oversized, out catalog, out error));
+            var deep = new string('[', 65) + new string(']', 65);
+            Check("deeply nested JSON is refused before recursive parsing",
+                !CommunityCatalog.TryParse(System.Text.Encoding.UTF8.GetBytes(deep),
+                                           out catalog, out error)
+                && error.Contains("deeply"));
+        }
+
+        /// <summary>Bytes shaped like a level file: the game's magic, a format version, then filler.</summary>
+        private static byte[] LevelBytes(int formatVersion, int length)
+        {
+            var bytes = new byte[length];
+            var magic = new byte[] { 83, 117, 114, 103, 101, 111, 110, 115 };
+            Buffer.BlockCopy(magic, 0, bytes, 0, magic.Length);
+            bytes[8] = (byte)(formatVersion & 0xFF);
+            bytes[9] = (byte)((formatVersion >> 8) & 0xFF);
+            for (var i = 10; i < length; i++) bytes[i] = (byte)(i * 31);
+            return bytes;
+        }
+
+        private static byte[] GameImageBytes(int dataLength)
+        {
+            var bit = 0;
+            var totalBits = 104 + dataLength * 8;
+            var words = new uint[(totalBits + 31) / 32];
+
+            WriteImageBits(words, ref bit, (uint)Math.Max(1, dataLength / 4), 31);
+            WriteImageBits(words, ref bit, 1, 31);
+            WriteImageBits(words, ref bit, 4, 4); // TextureFormat.RGBA32: four bytes per pixel.
+            WriteImageBits(words, ref bit, (uint)dataLength, 31);
+            bit = (bit + 7) & ~7;
+            for (var i = 0; i < dataLength; i++)
+                WriteImageBits(words, ref bit, (uint)(i * 31), 8);
+
+            var bytes = new byte[(bit + 7) / 8];
+            for (var i = 0; i < words.Length; i++)
+            {
+                var offset = i * 4;
+                if (offset < bytes.Length) bytes[offset] = (byte)words[i];
+                if (offset + 1 < bytes.Length) bytes[offset + 1] = (byte)(words[i] >> 8);
+                if (offset + 2 < bytes.Length) bytes[offset + 2] = (byte)(words[i] >> 16);
+                if (offset + 3 < bytes.Length) bytes[offset + 3] = (byte)(words[i] >> 24);
+            }
+            return bytes;
+        }
+
+        private static void WriteImageBits(uint[] words, ref int bitOffset, uint value, int count)
+        {
+            var written = 0;
+            while (written < count)
+            {
+                var word = bitOffset / 32;
+                var within = bitOffset % 32;
+                var take = Math.Min(count - written, 32 - within);
+                var mask = take == 32 ? uint.MaxValue : (1u << take) - 1u;
+                words[word] |= ((value >> written) & mask) << within;
+                written += take;
+                bitOffset += take;
+            }
+        }
+
+        /// <summary>
+        /// Rewrites the first entry's length field to int.MaxValue, leaving everything else alone.
+        /// The layout is magic, version, then name length, name, payload length - so the field sits
+        /// immediately after the first entry's name.
+        /// </summary>
+        private static byte[] OverstatedEntryLength(byte[] packed)
+        {
+            var copy = (byte[])packed.Clone();
+            var offset = 16 + 2;
+            var nameLength = copy[offset] | (copy[offset + 1] << 8);
+            offset += 2 + nameLength;
+
+            copy[offset] = 0xFF;
+            copy[offset + 1] = 0xFF;
+            copy[offset + 2] = 0xFF;
+            copy[offset + 3] = 0x7F;
+            return copy;
+        }
+
+        private static int FindBytes(byte[] haystack, byte[] needle)
+        {
+            if (haystack == null || needle == null || needle.Length == 0
+                || needle.Length > haystack.Length) return -1;
+            for (var i = 0; i <= haystack.Length - needle.Length; i++)
+            {
+                var match = true;
+                for (var j = 0; j < needle.Length; j++)
+                {
+                    if (haystack[i + j] == needle[j]) continue;
+                    match = false;
+                    break;
+                }
+                if (match) return i;
+            }
+            return -1;
         }
 
         private static bool BytesEqual(byte[] left, byte[] right)

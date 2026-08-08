@@ -1,0 +1,157 @@
+import { inspectLevelBundle, sha256Hex } from "@ss2revive/community-contracts";
+import type { RuntimeConfig } from "./config";
+import { HttpError } from "./http";
+
+const FIXTURE_ID = "1a658233-92c5-4b63-87fc-4740c855730b";
+const FIXTURE_CREATED_AT = Date.UTC(2026, 0, 1, 0, 0, 0);
+const encoder = new TextEncoder();
+
+function writeUint16(output: number[], value: number): void {
+  output.push(value & 0xff, (value >>> 8) & 0xff);
+}
+
+function writeInt32(output: number[], value: number): void {
+  output.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
+}
+
+function writeEntry(output: number[], name: string, payload: Uint8Array): void {
+  const nameBytes = encoder.encode(name);
+  writeUint16(output, nameBytes.length);
+  output.push(...nameBytes);
+  writeInt32(output, payload.length);
+  output.push(...payload);
+}
+
+function writeBits(bytes: Uint8Array, start: number, value: number, count: number): number {
+  for (let bit = 0; bit < count; bit += 1) {
+    if ((Math.floor(value / 2 ** bit) & 1) !== 0) {
+      const absolute = start + bit;
+      bytes[Math.floor(absolute / 8)]! |= 1 << (absolute % 8);
+    }
+  }
+  return start + count;
+}
+
+function fixtureThumbnail(): Uint8Array {
+  const bytes = new Uint8Array(17);
+  let bit = 0;
+  bit = writeBits(bytes, bit, 1, 31);
+  bit = writeBits(bytes, bit, 1, 31);
+  bit = writeBits(bytes, bit, 4, 4);
+  writeBits(bytes, bit, 4, 31);
+  bytes.set([0x33, 0x66, 0x99, 0xff], 13);
+  return bytes;
+}
+
+export async function buildLocalFixture(): Promise<{
+  bytes: Uint8Array;
+  thumbnail: Uint8Array;
+  bundleKey: string;
+  thumbnailKey: string;
+  sha256: string;
+  thumbnailSha256: string;
+}> {
+  const content = new Uint8Array(18);
+  content.set(encoder.encode("Surgeons"), 0);
+  content[8] = 29;
+  content[9] = 0;
+  content.set(encoder.encode("phase0!!"), 10);
+  const thumbnail = fixtureThumbnail();
+  const contentSha256 = await sha256Hex(content);
+  const manifest = encoder.encode(JSON.stringify({
+    bundleVersion: 2,
+    id: FIXTURE_ID,
+    title: "Phase 0 Local Test Room",
+    description: "A deterministic local-only backend fixture.",
+    createdAt: FIXTURE_CREATED_AT,
+    exportedAt: FIXTURE_CREATED_AT + 1000,
+    clientVersion: 29,
+    contentVersion: 1,
+    reviveVersion: "0.1.0",
+    contentSha256,
+    creators: ["STEAM-76561198145479980"],
+    tags: ["TEAM_COOP", "LOCAL_TEST"],
+    configurations: [{ numberPlayers: 1, numberTeams: 1, levelTeamConfigurations: [] }],
+    validations: [{ description: "Local deterministic fixture" }],
+  }));
+  const output = [...encoder.encode("SS2REVIVE LEVEL\n")];
+  writeUint16(output, 2);
+  writeEntry(output, "asset.json", manifest);
+  writeEntry(output, "level.bin", content);
+  writeEntry(output, "thumb.png", thumbnail);
+  writeUint16(output, 0);
+  const bytes = new Uint8Array(output);
+  const inspected = await inspectLevelBundle(bytes, { nowMs: Date.UTC(2026, 7, 8) });
+  const thumbnailSha256 = await sha256Hex(thumbnail);
+  return {
+    bytes,
+    thumbnail,
+    sha256: inspected.bundleSha256,
+    thumbnailSha256,
+    bundleKey: `approved/maps/${FIXTURE_ID}/r1/${inspected.bundleSha256}.ss2level`,
+    thumbnailKey: `approved/thumbnails/${FIXTURE_ID}/r1/${thumbnailSha256}.bin`,
+  };
+}
+
+export async function seedLocalFixture(env: Env, config: RuntimeConfig): Promise<{ id: string; revision: number }> {
+  if (!config.allowMockAuth) throw new HttpError(404, "not_found", "The route was not found.");
+  const fixture = await buildLocalFixture();
+  await env.MAP_BUCKET.put(fixture.bundleKey, fixture.bytes, {
+    httpMetadata: { contentType: "application/vnd.ss2revive.level" },
+    customMetadata: { sha256: fixture.sha256 },
+  });
+  await env.MAP_BUCKET.put(fixture.thumbnailKey, fixture.thumbnail, {
+    httpMetadata: { contentType: "application/octet-stream" },
+    customMetadata: { sha256: fixture.thumbnailSha256 },
+  });
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO maps
+         (id, status, current_revision, title, title_sort, description, created_at_ms, updated_at_ms)
+       VALUES (?, 'published', 1, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         status = excluded.status, current_revision = excluded.current_revision,
+         title = excluded.title, title_sort = excluded.title_sort, description = excluded.description,
+         created_at_ms = excluded.created_at_ms, updated_at_ms = excluded.updated_at_ms`,
+    ).bind(
+      FIXTURE_ID,
+      "Phase 0 Local Test Room",
+      "phase 0 local test room",
+      "A deterministic local-only backend fixture.",
+      FIXTURE_CREATED_AT,
+      FIXTURE_CREATED_AT + 1000,
+    ),
+    env.DB.prepare(`DELETE FROM map_tags WHERE map_id = ? AND revision = 1`).bind(FIXTURE_ID),
+    env.DB.prepare(`DELETE FROM map_versions WHERE map_id = ? AND revision = 1`).bind(FIXTURE_ID),
+    env.DB.prepare(
+      `INSERT INTO map_versions
+         (map_id, revision, status, code, creator_ids_json, tags_json,
+          configurations_json, validations_json, player_counts_csv,
+          client_version, map_format_version, minimum_revive_version, revive_version,
+          size_bytes, sha256, bundle_key,
+          thumbnail_size_bytes, thumbnail_sha256, thumbnail_key, created_at_ms)
+       VALUES (?, 1, 'published', ?, ?, ?, ?, ?, ?, 29, 29, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      FIXTURE_ID,
+      "M4JlGsWSY0uH_EdAyFVzCw",
+      JSON.stringify(["STEAM-76561198145479980"]),
+      JSON.stringify(["TEAM_COOP", "LOCAL_TEST"]),
+      JSON.stringify([{ numberPlayers: 1, numberTeams: 1, levelTeamConfigurations: [] }]),
+      JSON.stringify([{ description: "Local deterministic fixture" }]),
+      ",1,",
+      "0.1.0",
+      "0.1.0",
+      fixture.bytes.length,
+      fixture.sha256,
+      fixture.bundleKey,
+      fixture.thumbnail.length,
+      fixture.thumbnailSha256,
+      fixture.thumbnailKey,
+      FIXTURE_CREATED_AT + 1000,
+    ),
+    env.DB.prepare(`INSERT INTO map_tags (map_id, revision, tag) VALUES (?, 1, ?)`).bind(FIXTURE_ID, "TEAM_COOP"),
+    env.DB.prepare(`INSERT INTO map_tags (map_id, revision, tag) VALUES (?, 1, ?)`).bind(FIXTURE_ID, "LOCAL_TEST"),
+  ]);
+  return { id: FIXTURE_ID, revision: 1 };
+}

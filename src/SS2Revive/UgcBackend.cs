@@ -34,6 +34,13 @@ namespace SS2Revive
 
         internal static bool Available => _store != null;
 
+        /// <summary>
+        /// The library itself, for the one caller that is not translating a game call into a local
+        /// answer. <see cref="LevelSharing"/> moves whole levels in and out of it as files, which is
+        /// a level-library operation with no <see cref="UGCService2"/> method behind it.
+        /// </summary>
+        internal static UgcStore Store => _store;
+
         internal static void Initialise(string saveDirectory)
         {
             try
@@ -41,6 +48,7 @@ namespace SS2Revive
                 var root = SaveLocation.ResolveDirectory(saveDirectory);
                 _store = new UgcStore(root, message => Plugin.Log.LogWarning("UGC store: " + message));
                 Plugin.Log.LogInfo("Local level library ready: " + _store.Describe());
+                CommunityCatalogClient.Initialise(_store, Plugin.CommunityCatalogUrl.Value);
             }
             catch (Exception ex)
             {
@@ -197,7 +205,7 @@ namespace SS2Revive
             try
             {
                 int pageCount;
-                var matches = _store.Search(query, out pageCount);
+                var matches = SearchLocalAndCommunity(query, out pageCount);
 
                 var summaries = new List<LevelSummaryData>(matches.Count);
                 for (var i = 0; i < matches.Count; i++) summaries.Add(ToSummary(matches[i]));
@@ -226,7 +234,7 @@ namespace SS2Revive
             try
             {
                 int pageCount;
-                var matches = _store.Search(new UgcQuery
+                var matches = SearchLocalAndCommunity(new UgcQuery
                 {
                     Status = UgcStore.StatusPublished,
                     ResultsPerPage = int.MaxValue,
@@ -240,6 +248,61 @@ namespace SS2Revive
             }
 
             return summaries;
+        }
+
+        /// <summary>
+        /// Merges before paging so the terminal sees one coherent Discover library. Authored local
+        /// levels always win an id collision; an installed community map wins while current, and a
+        /// newer catalogue revision replaces its summary so selecting it performs an in-place update.
+        /// </summary>
+        private static List<UgcLevelRecord> SearchLocalAndCommunity(UgcQuery query, out int pageCount)
+        {
+            if (query == null) query = new UgcQuery();
+            var allQuery = new UgcQuery
+            {
+                Status = query.Status,
+                CreatorId = query.CreatorId,
+                Tag = query.Tag,
+                TitleContains = query.TitleContains,
+                PartySize = query.PartySize,
+                Ids = query.Ids,
+                PageIndex = 0,
+                ResultsPerPage = int.MaxValue,
+                AnyStatus = query.AnyStatus,
+            };
+
+            int ignoredPages;
+            var combined = _store.Search(allQuery, out ignoredPages);
+            var remote = CommunityCatalogClient.Search(allQuery);
+            for (var i = 0; i < remote.Count; i++)
+            {
+                var entry = remote[i];
+                var installed = _store.Get(entry.Id);
+                if (installed != null)
+                {
+                    if (!installed.IsImported) continue;
+                    var latest = installed.LatestContent();
+                    if (latest != null && latest.ContentVersion >= entry.Revision) continue;
+                    for (var localIndex = combined.Count - 1; localIndex >= 0; localIndex--)
+                    {
+                        if (string.Equals(combined[localIndex].Id, entry.Id,
+                                          StringComparison.OrdinalIgnoreCase))
+                            combined.RemoveAt(localIndex);
+                    }
+                }
+
+                combined.Add(entry.ToRecord(CommunityCatalogClient.ContentKey(entry),
+                                            CommunityCatalogClient.ThumbnailKey(entry)));
+            }
+
+            combined.Sort((a, b) => b.UpdatedAtMs.CompareTo(a.UpdatedAtMs));
+            var perPage = query.ResultsPerPage > 0 ? query.ResultsPerPage : UgcStore.DefaultResultsPerPage;
+            pageCount = combined.Count == 0 ? 1 : (int)(((long)combined.Count + perPage - 1) / perPage);
+            var page = query.PageIndex < 0 ? 0 : query.PageIndex;
+            var start = (long)page * perPage;
+            if (start >= combined.Count) return new List<UgcLevelRecord>();
+            var take = Math.Min(perPage, combined.Count - (int)start);
+            return combined.GetRange((int)start, take);
         }
 
         // ----------------------------------------------------------------- edits
@@ -522,6 +585,12 @@ namespace SS2Revive
         internal static bool OwnsKey(string key) => UgcStore.OwnsKey(key);
 
         internal static byte[] ReadKey(string key) => _store == null ? null : _store.ReadKey(key);
+
+        internal static bool IsImported(string serverLevelId)
+        {
+            var level = _store == null ? null : _store.Get(serverLevelId);
+            return level != null && level.IsImported;
+        }
 
         // ------------------------------------------------------------ conversions
 

@@ -10,8 +10,9 @@ obj/
 # Local machine paths live here and must never be published.
 Directory.Build.user.props
 
-# Working notes and protocol write-ups. Kept on disk, not in the repository.
+# Documentation is retained locally and transferred manually, not published from this branch.
 docs/
+*.md
 
 # BepInEx is linked from the README, never vendored here.
 lib/
@@ -25,3 +26,15 @@ dist/
 # Inventory.dat, ProgressionConfig.json and the news tile artwork.
 *.dat
 assets/newsfeed/images/*.png
+
+# Local Cloudflare Worker development. Never commit local state or secrets.
+backend/node_modules/
+backend/**/node_modules/
+backend/**/.wrangler/
+backend/**/.dev.vars
+backend/**/.env*
+backend/**/wrangler.production.jsonc
+backend/**/coverage/
+backend/**/dist/
+backend/**/dist-production/
+.pnpm-store/
