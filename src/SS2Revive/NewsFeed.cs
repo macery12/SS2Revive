@@ -43,7 +43,7 @@ namespace SS2Revive
             ""ImageUrl"": ""tile-1.png"",
             ""ClickUrl"": """",
             ""Title"": ""Multiplayer Restored"",
-            ""SubTitle"": ""Parties, invites and peer-to-peer play now run over Steam. Press F10 in a lobby to invite a friend.""
+            ""SubTitle"": ""Parties, invites and peer-to-peer play now run over Steam. Invite friends or join them through Steam's Friends list.""
         },
         {
             ""ImageUrl"": ""tile-2.png"",

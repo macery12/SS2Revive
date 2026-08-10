@@ -1,0 +1,144 @@
+name: Build draft release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  setup:
+    name: Build Windows setup
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Validate tag and project version
+        id: metadata
+        shell: pwsh
+        env:
+          RELEASE_TAG_INPUT: ${{ github.ref_name }}
+        run: |
+          $tag = $env:RELEASE_TAG_INPUT
+          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+)$') {
+            throw "Release tags must use the exact vMAJOR.MINOR.PATCH form. Received: $tag"
+          }
+
+          [xml]$props = Get-Content -LiteralPath 'Directory.Build.props'
+          $projectVersion = [string]$props.Project.PropertyGroup.SS2ReviveVersion
+          $version = $Matches.version
+          if ($projectVersion -ne $version) {
+            throw "Tag $tag does not match SS2ReviveVersion $projectVersion."
+          }
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Publish single-file setup
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'ss2revive-release'
+          dotnet publish tools/Setup/SS2Revive.Setup.csproj `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained true `
+            --output $output
+          if ($LASTEXITCODE -ne 0) { throw 'Setup publish failed.' }
+
+          $source = Join-Path $output 'SS2Revive.Setup.exe'
+          $name = 'SS2Revive-Setup-${{ steps.metadata.outputs.version }}.exe'
+          $destination = Join-Path $output $name
+          Move-Item -LiteralPath $source -Destination $destination
+
+          & $destination --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'Published setup self-test failed.' }
+
+          $hash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content `
+            -LiteralPath (Join-Path $output "$name.sha256") `
+            -Encoding ascii `
+            -NoNewline
+
+      - name: Prepare draft release notes
+        shell: pwsh
+        run: |
+          @'
+          # SS2 Revive ${{ steps.metadata.outputs.tag }}
+
+          SS2 Revive restores multiplayer, progression, Creation Mode, and community-made maps for Surgeon Simulator 2 build 1.3.7.3054.
+
+          ## Install
+
+          1. Download `SS2Revive-Setup-${{ steps.metadata.outputs.version }}.exe`.
+          2. Verify it with the attached `.sha256` file.
+          3. Run Setup, choose an install location, and enter the Steam login name for an account that owns Surgeon Simulator 2.
+          4. Complete the password and Steam Guard prompts in DepotDownloader's separate window.
+          5. Start the game with the launcher Setup creates.
+
+          The setup executable is currently unsigned, so Windows may display a SmartScreen warning.
+
+          ## Maintainer checklist before publishing
+
+          - Attach `SS2Revive-${{ steps.metadata.outputs.version }}.zip`, created locally with `./pack.ps1`.
+          - Confirm the mod ZIP contains `SS2Revive.dll`, `SS2Revive_Data.dll`, and `newsfeed/NewsFeed.json`.
+          - Confirm the public community service is healthy.
+          - Replace or expand these draft notes from the local ignored release-description document if needed.
+          - Publish this draft only after all assets are present.
+
+          ## Compatibility
+
+          Windows x64 and Surgeon Simulator 2 build 1.3.7.3054 are required. Legacy maps are preserved as-is and some may contain bugs, fail to load, or open to a black screen.
+          '@ | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'release-notes.md') -Encoding utf8
+
+      - name: Create or update draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'ss2revive-release'
+          $exe = Join-Path $output "SS2Revive-Setup-$env:RELEASE_VERSION.exe"
+          $checksum = "$exe.sha256"
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+
+          $existing = & gh release view $env:RELEASE_TAG --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $release = $existing | ConvertFrom-Json
+            if (-not $release.isDraft) {
+              throw "Release $env:RELEASE_TAG is already public; refusing to replace its assets."
+            }
+
+            gh release upload $env:RELEASE_TAG $exe $checksum --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Uploading setup assets failed.' }
+            gh release edit $env:RELEASE_TAG `
+              --draft `
+              --title "SS2 Revive $env:RELEASE_TAG" `
+              --notes-file $notes
+            if ($LASTEXITCODE -ne 0) { throw 'Updating the draft release failed.' }
+          }
+          else {
+            gh release create $env:RELEASE_TAG $exe $checksum `
+              --verify-tag `
+              --draft `
+              --title "SS2 Revive $env:RELEASE_TAG" `
+              --notes-file $notes
+            if ($LASTEXITCODE -ne 0) { throw 'Creating the draft release failed.' }
+          }

@@ -1184,7 +1184,7 @@ namespace SS2ReviveData.Tests
 
             CommunityCatalog catalog;
             string error;
-            Check("a valid static catalogue parses",
+            Check("a valid API catalogue parses",
                 CommunityCatalog.TryParse(System.Text.Encoding.UTF8.GetBytes(json), out catalog, out error)
                 && catalog.Entries.Count == 1);
             var extremeDates = json.Replace("\"createdAtMs\":100,\"updatedAtMs\":200",

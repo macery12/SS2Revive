@@ -123,8 +123,8 @@ namespace SS2Revive
                 + "UGC service. Without it, loading into Creation Mode hangs on a black screen: the "
                 + "game uploads a new level before it will open it, and that upload can no longer "
                 + "complete or fail. Levels go to the SS2Revive folder beside your other saves, one "
-                + "folder each. Publishing works, but only you can see the result - there is no "
-                + "shared level browser left to publish to.");
+                + "folder each. Saved levels can be published to the restored community browser "
+                + "after Steam authentication.");
             LevelSharingEnabled = Config.Bind("CreationMode", "LevelSharing", true,
                 "Turn the terminal's Share button into an Export button, and add an Import button "
                 + "to the Create screen. Export writes the level to one .ss2level file and copies "
@@ -132,9 +132,9 @@ namespace SS2Revive
                 + ".ss2level file left in the import folder. Both folders sit beside your saves, in "
                 + "the SS2Revive folder. Send the file however you like and post the code with it - "
                 + "the terminal's search box has always accepted a code, so once somebody has "
-                + "imported the file, the code finds the level on their machine too. Imported "
-                + "levels arrive published and credited to whoever built them, so they can be "
-                + "played and browsed but not edited.");
+                + "imported the file, the code finds the level on their machine too. Manually "
+                + "imported levels are published only in the local library and stay credited to "
+                + "whoever built them, so they can be played and browsed but not edited.");
             // This intentionally uses a new key. Older builds wrote an empty CommunityCatalogUrl
             // into existing config files; reusing it would silently keep the new public service
             // disabled for every upgrading player.
@@ -254,9 +254,9 @@ namespace SS2Revive
                 Log.LogError("Build 1.5.0 was the offline patch, and it removed the netcode this "
                              + "mod exists to restore - there is nothing left for the party, "
                              + "transport and backend patches to attach to.");
-                Log.LogError($"Install build {TestedGameVersion} instead. installCurrentVersion.ps1 "
-                             + "in the mod's repository downloads it from Steam for an account "
-                             + "that owns the game.");
+                Log.LogError($"Install build {TestedGameVersion} instead. SS2Revive-Setup.exe "
+                             + "from the latest release downloads it from Steam for an account "
+                             + "that owns the game, then installs BepInEx and this mod.");
                 Log.LogError("Everything below this line is a consequence of that, not a separate "
                              + "problem.");
                 Log.LogError("=====================================================================");

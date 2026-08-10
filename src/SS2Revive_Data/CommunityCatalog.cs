@@ -5,9 +5,9 @@ using System.Text;
 namespace SS2ReviveData
 {
     /// <summary>
-    /// One entry in the read-only community catalogue. Object locations are deliberately relative
-    /// keys, never URLs: the client resolves them against the configured catalogue directory, so a
-    /// catalogue author cannot turn a thumbnail or level request into an arbitrary web request.
+    /// One entry in the public community catalogue. Object locations are deliberately relative
+    /// keys, never arbitrary URLs: the client resolves them against the configured API origin, so
+    /// catalogue data cannot redirect a thumbnail or level request to another host.
     /// </summary>
     public sealed class CommunityCatalogEntry
     {
@@ -64,7 +64,7 @@ namespace SS2ReviveData
     }
 
     /// <summary>
-    /// Parser and query model for the phase-one static community catalogue. It has no networking
+    /// Parser and query model for the Worker-produced community catalogue. It has no networking
     /// dependency, which keeps the hostile-input rules testable outside Unity.
     /// </summary>
     public sealed class CommunityCatalog

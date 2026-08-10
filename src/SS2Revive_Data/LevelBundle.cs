@@ -37,9 +37,9 @@ namespace SS2ReviveData
     /// <see cref="Unpack"/> treats every one of those numbers as hostile. Each is bounded before it
     /// is used to size an allocation, entries are counted, and the level blob is checked for the
     /// game's own file magic before it is ever handed to the game. That does not make a bundle safe
-    /// to load - the level format itself has unbounded reads in it, which is a separate problem
-    /// documented in UGCSERVER.md - but it does mean a malformed or malicious bundle is rejected by
-    /// this reader rather than by an out-of-memory somewhere inside Unity.
+    /// to load - the level format needs the separate bounded guards installed by the plugin - but
+    /// it does mean a malformed or malicious bundle is rejected by this reader rather than by an
+    /// out-of-memory somewhere inside Unity.
     /// </summary>
     public sealed class LevelBundle
     {
