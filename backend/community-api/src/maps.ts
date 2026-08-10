@@ -258,6 +258,77 @@ export async function listMaps(
   return jsonResponse(page, 200, requestId);
 }
 
+/**
+ * Bounded compatibility document consumed by the current in-game catalogue client.
+ * Object locators are API paths relative to /v1/catalog, never private R2 keys.
+ */
+export async function catalogDocument(
+  env: Env,
+  requestId: string,
+  nowMs: number,
+): Promise<Response> {
+  const result = await env.DB.prepare(
+    `${MAP_SELECT}
+      WHERE m.status = 'published' AND v.status = 'published'
+        AND v.revision = m.current_revision
+        AND v.client_version = 29 AND v.map_format_version = 29
+      ORDER BY m.updated_at_ms DESC, m.id ASC
+      LIMIT 2001`,
+  ).all<MapRow>();
+  if (result.results.length > 2000) {
+    throw new HttpError(503, "temporarily_unavailable", "The bounded catalogue could not be produced.");
+  }
+  const maps = result.results.map((row) => {
+    const map = mapDto(row);
+    const bundleKey = map.downloadUrl.startsWith("/v1/") ? map.downloadUrl.slice(4) : "";
+    if (bundleKey === "") {
+      throw new HttpError(503, "object_metadata_mismatch", "Stored bundle metadata is invalid.");
+    }
+    const entry: Record<string, unknown> = {
+      id: map.id,
+      code: map.code,
+      revision: map.revision,
+      title: map.title,
+      description: map.description,
+      creatorIds: map.creatorIds,
+      tags: map.tags,
+      createdAtMs: map.createdAtMs,
+      updatedAtMs: map.updatedAtMs,
+      clientVersion: map.clientVersion,
+      mapFormatVersion: map.mapFormatVersion,
+      minimumReviveVersion: map.minimumReviveVersion,
+      sizeBytes: map.sizeBytes,
+      sha256: map.sha256,
+      bundleKey,
+      configurations: map.configurations,
+      validations: map.validations,
+    };
+    if (map.reviveVersion !== undefined) entry.reviveVersion = map.reviveVersion;
+    if (map.thumbnail !== undefined) {
+      const thumbnailKey = map.thumbnail.url.startsWith("/v1/") ? map.thumbnail.url.slice(4) : "";
+      if (thumbnailKey === "") {
+        throw new HttpError(503, "object_metadata_mismatch", "Stored thumbnail metadata is invalid.");
+      }
+      entry.thumbnailKey = thumbnailKey;
+      entry.thumbnailSizeBytes = map.thumbnail.sizeBytes;
+      entry.thumbnailSha256 = map.thumbnail.sha256;
+    }
+    return entry;
+  });
+  const document = {
+    schemaVersion: 1,
+    generatedAtUtc: new Date(nowMs).toISOString(),
+    maps,
+  };
+  const serialized = JSON.stringify(document);
+  if (new TextEncoder().encode(serialized).length > 2 * 1024 * 1024) {
+    throw new HttpError(503, "temporarily_unavailable", "The bounded catalogue could not be produced.");
+  }
+  return jsonResponse(document, 200, requestId, {
+    "Cache-Control": "public, max-age=60, stale-while-revalidate=300",
+  });
+}
+
 async function publishedMapRow(env: Env, mapId: string, revision?: number): Promise<MapRow | null> {
   const revisionClause = revision === undefined ? "v.revision = m.current_revision" : "v.revision = ?";
   const statement = env.DB.prepare(

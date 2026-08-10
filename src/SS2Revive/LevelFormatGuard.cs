@@ -81,6 +81,36 @@ namespace SS2Revive
             new HashSet<string>(StringComparer.Ordinal);
         [ThreadStatic] private static bool _readingBody;
         [ThreadStatic] private static bool _readingSummary;
+        [ThreadStatic] private static bool _readingTrustedBundledSummary;
+        [ThreadStatic] private static bool _publicationReadFailed;
+
+        /// <summary>
+        /// Reads metadata from the exact-hash bundled LegacyLevels archive. Early game builds
+        /// wrote a complete 512x289 RGB24 preview but left its width and height fields at zero.
+        /// Keep that compatibility signal scoped to the local archive: imported and downloaded
+        /// summaries continue through the strict reader unchanged.
+        /// </summary>
+        internal static LevelSummaryData ReadTrustedBundledSummary(byte[] data)
+        {
+            var previous = _readingTrustedBundledSummary;
+            _readingTrustedBundledSummary = true;
+            try
+            {
+                var summary = LevelSummaryDataService.ReadLevelSummaryData(data);
+                if (summary != null)
+                {
+                    var image = summary.legacyLevelImage;
+                    if (TryRepairTrustedBundledImage(ref image))
+                        summary.legacyLevelImage = image;
+                }
+                return summary;
+            }
+            finally
+            {
+                _readingTrustedBundledSummary = previous;
+                _readingSummary = false;
+            }
+        }
 
         internal static void Apply(Harmony harmony)
         {
@@ -187,6 +217,7 @@ namespace SS2Revive
                 return;
             }
 
+            _publicationReadFailed = true;
             Plugin.Log.LogError("Refusing a level that says it is " + x + "x" + y + "x" + z
                                 + " voxels. The largest this game can write is under "
                                 + MaxVoxelVolume + ", so this file is corrupt or was built to "
@@ -209,10 +240,10 @@ namespace SS2Revive
                 var version = data[8] | (data[9] << 8);
                 if (version == 29) return true;
 
-                // Build 1.3.7 itself ships most of its active lobby/campaign catalogue as format
-                // 28. Those files are trusted by exact SHA-256, loaded from StreamingAssets/Levels
+                // Build 1.3.7 ships its active lobby/campaign catalogue and a dormant historical
+                // archive in old formats. Both are trusted by exact SHA-256 from this installation
                 // at startup. Merely naming a custom file like a bundled map grants nothing; its
-                // bytes have to match the installed game object exactly.
+                // bytes have to match one of the installed game objects exactly.
                 if (version > 0 && version < 29 && version != 25
                     && IsTrustedBundledLevel(data))
                 {
@@ -220,6 +251,7 @@ namespace SS2Revive
                 }
             }
 
+            _publicationReadFailed = true;
             Plugin.Log.LogError("Refusing level data that is oversized, malformed, or uses an old "
                                 + "format without matching a level bundled with this game install. "
                                 + "Custom and shared content is restricted to current format 29.");
@@ -232,38 +264,51 @@ namespace SS2Revive
             TrustedBundledLevelHashes.Clear();
             try
             {
-                var root = Path.Combine(Application.streamingAssetsPath, "Levels");
-                if (!Directory.Exists(root))
+                var roots = new[]
                 {
-                    Plugin.Log.LogWarning("Could not find the bundled level directory at " + root
+                    Path.Combine(Application.streamingAssetsPath, "Levels"),
+                    Path.Combine(Application.streamingAssetsPath, "LegacyLevels"),
+                };
+                var foundRoot = false;
+                for (var rootIndex = 0; rootIndex < roots.Length; rootIndex++)
+                {
+                    var root = roots[rootIndex];
+                    if (!Directory.Exists(root)) continue;
+                    foundRoot = true;
+
+                    var files = Directory.GetFiles(root, "*.lvl", SearchOption.AllDirectories);
+                    for (var i = 0; i < files.Length; i++)
+                    {
+                        try
+                        {
+                            var info = new FileInfo(files[i]);
+                            if (info.Length < 10 || info.Length > MaxBodyBytes) continue;
+                            using (var input = new FileStream(files[i], FileMode.Open, FileAccess.Read,
+                                                              FileShare.Read))
+                            using (var sha = SHA256.Create())
+                            {
+                                TrustedBundledLevelHashes.Add(Hex(sha.ComputeHash(input)));
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.Log.LogWarning("Could not trust bundled level " + files[i] + ": "
+                                                  + ex.Message);
+                        }
+                    }
+                }
+
+                if (!foundRoot)
+                {
+                    Plugin.Log.LogWarning("Could not find the bundled level directories under "
+                                          + Application.streamingAssetsPath
                                           + "; older bundled maps will remain restricted.");
                     return;
                 }
 
-                var files = Directory.GetFiles(root, "*.lvl", SearchOption.AllDirectories);
-                for (var i = 0; i < files.Length; i++)
-                {
-                    try
-                    {
-                        var info = new FileInfo(files[i]);
-                        if (info.Length < 10 || info.Length > MaxBodyBytes) continue;
-                        using (var input = new FileStream(files[i], FileMode.Open, FileAccess.Read,
-                                                          FileShare.Read))
-                        using (var sha = SHA256.Create())
-                        {
-                            TrustedBundledLevelHashes.Add(Hex(sha.ComputeHash(input)));
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Plugin.Log.LogWarning("Could not trust bundled level " + files[i] + ": "
-                                              + ex.Message);
-                    }
-                }
-
                 Plugin.Log.LogInfo("Trusted " + TrustedBundledLevelHashes.Count
-                                   + " exact bundled level file(s); custom maps still require "
-                                   + "format 29.");
+                                   + " exact active or legacy bundled level file(s); custom maps "
+                                   + "still require format 29.");
             }
             catch (Exception ex)
             {
@@ -308,6 +353,7 @@ namespace SS2Revive
                     : MaxCircuitLinks;
             if (capacity >= 0 && capacity <= maximum) return;
 
+            _publicationReadFailed = true;
             Plugin.Log.LogError("Refusing a level body that requests a " + capacity
                                 + "-entry " + valueType.Name + " dictionary (maximum "
                                 + maximum + ").");
@@ -350,8 +396,31 @@ namespace SS2Revive
                     (uint)Math.Max(0, image.width), (uint)Math.Max(0, image.height),
                     (uint)image.format, (uint)bytes.Length)) return;
 
+            if (_readingTrustedBundledSummary && TryRepairTrustedBundledImage(ref image))
+            {
+                __result.legacyLevelImage = image;
+                return;
+            }
+
             Plugin.Log.LogError("Dropping an invalid embedded level-summary image.");
             __result.legacyLevelImage = new LevelSummaryImageData(null, 0, 0, TextureFormat.Alpha8);
+        }
+
+        private static bool TryRepairTrustedBundledImage(ref LevelSummaryImageData image)
+        {
+            // The pre-release archive serializer omitted only the dimensions. Its RGB byte count
+            // is exact, so this repair neither guesses nor permits a variable-sized allocation.
+            const int legacyWidth = 512;
+            const int legacyHeight = 289;
+            const int legacyRgbBytes = legacyWidth * legacyHeight * 3;
+            var bytes = image.data;
+            if (bytes == null || image.width != 0 || image.height != 0
+                || image.format != TextureFormat.RGB24 || bytes.Length != legacyRgbBytes)
+                return false;
+
+            image = new LevelSummaryImageData(
+                bytes, legacyWidth, legacyHeight, TextureFormat.RGB24);
+            return true;
         }
 
         private static bool ImageRead_Prefix(byte[] data, ref LevelSummaryImageData __result)
@@ -520,6 +589,7 @@ namespace SS2Revive
 
                 if (compressedLength < 0 || compressedLength > MaxCompressedBytes)
                 {
+                    _publicationReadFailed = true;
                     Plugin.Log.LogError("Refusing a level whose compressed body claims to be "
                                         + compressedLength + " bytes. Loading it as an empty room.");
                     return false;
@@ -530,7 +600,10 @@ namespace SS2Revive
 
                 byte[] body;
                 if (!TryInflate(compressed, out body))
+                {
+                    _publicationReadFailed = true;
                     return false;
+                }
 
                 var inner = new ReadStream();
                 inner.Start(new uint[(body.Length + 3) / 4], body, body.Length);
@@ -541,6 +614,7 @@ namespace SS2Revive
             }
             catch (Exception ex)
             {
+                _publicationReadFailed = true;
                 // The original would have thrown out of here too, but out of a reader with no
                 // bounds in it. Whatever is left of levelData is returned rather than propagating,
                 // for the same reason the dimension check does not throw.
@@ -600,6 +674,50 @@ namespace SS2Revive
             finally
             {
                 _readingBody = false;
+            }
+        }
+
+        /// <summary>
+        /// Publication is stricter than normal play fallback: the complete current-format reader
+        /// must finish and produce a bounded, non-empty voxel grid. This runs only on a package
+        /// built from the local library and never on an arbitrary network thread.
+        /// </summary>
+        internal static bool ValidateForPublication(byte[] data, out string message)
+        {
+            message = null;
+            if (_readBody == null)
+            {
+                message = "The protected level reader is not installed.";
+                return false;
+            }
+            _publicationReadFailed = false;
+            try
+            {
+                var parsed = LevelDataService.ReadLevelData(data);
+                var voxels = parsed == null ? null : parsed._voxelStates;
+                if (_publicationReadFailed || voxels == null
+                    || voxels.GetLength(0) < 1 || voxels.GetLength(1) < 1 || voxels.GetLength(2) < 1)
+                {
+                    message = "The complete format-29 level reader rejected this save.";
+                    return false;
+                }
+                var volume = (long)voxels.GetLength(0) * voxels.GetLength(1) * voxels.GetLength(2);
+                if (volume > MaxVoxelVolume)
+                {
+                    message = "The level voxel grid exceeds the publication limit.";
+                    return false;
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("Publication preflight rejected level data: " + ex.Message);
+                message = "The complete format-29 level reader rejected this save.";
+                return false;
+            }
+            finally
+            {
+                _publicationReadFailed = false;
             }
         }
     }

@@ -38,6 +38,7 @@ export type BundleValidationCode =
   | "content_missing"
   | "content_magic_invalid"
   | "content_format_invalid"
+  | "content_structure_invalid"
   | "content_checksum_invalid"
   | "image_invalid";
 
@@ -327,14 +328,21 @@ function requireString(value: unknown, name: string, maximum: number, allowEmpty
   return value;
 }
 
-function requireStringArray(value: unknown, name: string, maximumItems: number): string[] {
+function requireBoolean(value: unknown, name: string): boolean {
+  if (typeof value !== "boolean") {
+    fail("manifest_metadata_invalid", `${name} must be a boolean.`);
+  }
+  return value;
+}
+
+function requireStringArray(value: unknown, name: string, maximumItems: number, allowEmpty = false): string[] {
   if (!Array.isArray(value) || value.length > maximumItems) {
     fail("manifest_metadata_invalid", `${name} has too many entries or is not an array.`);
   }
   const result: string[] = [];
   const seen = new Set<string>();
   for (const item of value) {
-    const text = requireString(item, name, MAX_METADATA_ITEM_CHARACTERS, false);
+    const text = requireString(item, name, MAX_METADATA_ITEM_CHARACTERS, allowEmpty);
     if (seen.has(text)) fail("manifest_metadata_invalid", `${name} contains a duplicate entry.`);
     seen.add(text);
     result.push(text);
@@ -351,13 +359,21 @@ function validateStructuredMetadata(configurations: unknown, validations: unknow
   }
   for (const configuration of configurations) {
     if (!isPlainObject(configuration)) fail("manifest_metadata_invalid", "A configuration is not an object.");
-    if (!hasOnlyKeys(configuration, ["numberPlayers", "numberTeams", "levelTeamConfigurations"])) {
+    if (!hasOnlyKeys(configuration, [
+      "id", "numberPlayers", "numberTeams", "teamMode", "levelTeamConfigurations",
+    ])) {
       fail("manifest_metadata_invalid", "A configuration contains an unsupported field.");
+    }
+    if (!isCanonicalUuid(configuration.id)) {
+      fail("manifest_metadata_invalid", "A configuration id is not a canonical GUID.");
     }
     requireInteger(configuration.numberPlayers, "numberPlayers", 1, 4);
     requireInteger(configuration.numberTeams, "numberTeams", 0, 4);
+    const teamMode = requireString(configuration.teamMode, "teamMode", 16, false);
+    if (!["COOP", "FREE_FOR_ALL", "TEAM_BASED", "FREE_PLAY"].includes(teamMode)) {
+      fail("manifest_metadata_invalid", "teamMode is not supported.");
+    }
     const teams = configuration.levelTeamConfigurations;
-    if (teams === undefined) continue;
     if (!Array.isArray(teams) || teams.length > 4) {
       fail("manifest_metadata_invalid", "levelTeamConfigurations is invalid.");
     }
@@ -366,7 +382,7 @@ function validateStructuredMetadata(configurations: unknown, validations: unknow
       if (!hasOnlyKeys(team, ["objectives", "playersInTeam"])) {
         fail("manifest_metadata_invalid", "A team configuration contains an unsupported field.");
       }
-      if (team.objectives !== undefined) requireStringArray(team.objectives, "objectives", 32);
+      if (team.objectives !== undefined) requireStringArray(team.objectives, "objectives", 32, true);
       if (team.playersInTeam !== undefined) {
         if (!Array.isArray(team.playersInTeam) || team.playersInTeam.length > 4) {
           fail("manifest_metadata_invalid", "playersInTeam is invalid.");
@@ -381,10 +397,14 @@ function validateStructuredMetadata(configurations: unknown, validations: unknow
   }
   for (const validation of validations) {
     if (!isPlainObject(validation)) fail("manifest_metadata_invalid", "A validation is not an object.");
-    if (!hasOnlyKeys(validation, ["description"])) {
+    if (!hasOnlyKeys(validation, ["id", "description", "validated"])) {
       fail("manifest_metadata_invalid", "A validation contains an unsupported field.");
     }
-    if (validation.description !== undefined) requireString(validation.description, "validation description", 255, true);
+    if (!isCanonicalUuid(validation.id)) {
+      fail("manifest_metadata_invalid", "A validation id is not a canonical GUID.");
+    }
+    requireString(validation.description, "validation description", 255, true);
+    requireBoolean(validation.validated, "validated");
   }
   return { configurations, validations };
 }
@@ -455,7 +475,7 @@ function parseManifest(bytes: Uint8Array, containerVersion: 2, nowMs: number): B
 }
 
 function readBits(bytes: Uint8Array, startBit: number, count: number): number | null {
-  if (startBit < 0 || count < 0 || count > 31 || startBit + count > bytes.length * 8) return null;
+  if (startBit < 0 || count < 0 || count > 32 || startBit + count > bytes.length * 8) return null;
   let value = 0;
   for (let bit = 0; bit < count; bit += 1) {
     const absolute = startBit + bit;
@@ -463,6 +483,149 @@ function readBits(bytes: Uint8Array, startBit: number, count: number): number | 
     value += set * 2 ** bit;
   }
   return value;
+}
+
+const MAX_LEVEL_BODY_BYTES = 4_096_000;
+const MAX_COMPRESSED_LEVEL_BYTES = 8 * 1024 * 1024;
+const MAX_VOXEL_AXIS = 256;
+const MAX_VOXEL_VOLUME = 1024 * 1024;
+const MAX_PROP_DEFINITIONS = 4096;
+const MAX_PROP_INSTANCES = 20_000;
+
+class LevelBitReader {
+  private bit = 0;
+
+  constructor(private readonly bytes: Uint8Array, startBit = 0) {
+    this.bit = startBit;
+  }
+
+  align(): void {
+    this.bit = Math.ceil(this.bit / 8) * 8;
+    if (this.bit > this.bytes.length * 8) this.invalid();
+  }
+
+  bits(count: number): number {
+    const value = readBits(this.bytes, this.bit, count);
+    if (value === null) this.invalid();
+    this.bit += count;
+    return value;
+  }
+
+  signedInt(): number {
+    return this.bits(32) - 0x80000000;
+  }
+
+  string(): string {
+    this.align();
+    const length = this.bits(8);
+    let value = "";
+    for (let index = 0; index < length; index += 1) value += String.fromCharCode(this.bits(16));
+    return value;
+  }
+
+  skip(count: number): void {
+    if (!Number.isSafeInteger(count) || count < 0 || this.bit + count > this.bytes.length * 8) this.invalid();
+    this.bit += count;
+  }
+
+  byteSlice(count: number): Uint8Array {
+    this.align();
+    if (!Number.isSafeInteger(count) || count < 0) this.invalid();
+    const start = this.bit / 8;
+    if (start + count > this.bytes.length) this.invalid();
+    this.bit += count * 8;
+    return this.bytes.subarray(start, start + count);
+  }
+
+  private invalid(): never {
+    fail("content_structure_invalid", "level.bin is truncated or has an invalid bit stream.");
+  }
+}
+
+async function inflateLevelBody(compressed: Uint8Array): Promise<Uint8Array> {
+  if (compressed.length < 1 || compressed.length > MAX_COMPRESSED_LEVEL_BYTES) {
+    fail("content_structure_invalid", "The compressed level body size is unsafe.");
+  }
+  let stream: ReadableStream<Uint8Array>;
+  try {
+    const source = new Uint8Array(compressed.length);
+    source.set(compressed);
+    stream = new Blob([source]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  } catch {
+    fail("content_structure_invalid", "The compressed level body is invalid.");
+  }
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      length += result.value.length;
+      if (length > MAX_LEVEL_BODY_BYTES) {
+        await reader.cancel();
+        fail("content_structure_invalid", "The level body expands beyond the game writer's limit.");
+      }
+      chunks.push(result.value);
+    }
+  } catch (error) {
+    if (error instanceof BundleValidationError) throw error;
+    fail("content_structure_invalid", "The compressed level body cannot be decompressed.");
+  }
+  const body = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return body;
+}
+
+async function inspectLevelContentStructure(content: Uint8Array): Promise<void> {
+  if (content.length < 12 || content.length > MAX_LEVEL_BODY_BYTES) {
+    fail("content_structure_invalid", "The level file size is outside the game writer's bounds.");
+  }
+  const envelope = new LevelBitReader(content, 80);
+  const clientLevelId = envelope.string();
+  if (clientLevelId.length < 1 || clientLevelId.length > 64 || /[\u0000-\u001f]/u.test(clientLevelId)) {
+    fail("content_structure_invalid", "The client level identifier is invalid.");
+  }
+  const compressed = envelope.bits(1) === 1;
+  let body: Uint8Array;
+  if (compressed) {
+    const compressedLength = envelope.signedInt();
+    body = await inflateLevelBody(envelope.byteSlice(compressedLength));
+  } else {
+    envelope.align();
+    body = content.subarray(Math.ceil((80 + 8 + clientLevelId.length * 16 + 1) / 8));
+  }
+  if (body.length < 14 || body.length > MAX_LEVEL_BODY_BYTES) {
+    fail("content_structure_invalid", "The decoded level body size is invalid.");
+  }
+
+  const reader = new LevelBitReader(body);
+  reader.string();
+  const x = reader.signedInt();
+  const y = reader.signedInt();
+  const z = reader.signedInt();
+  if (
+    x < 1 || y < 1 || z < 1 || x > MAX_VOXEL_AXIS || y > MAX_VOXEL_AXIS || z > MAX_VOXEL_AXIS ||
+    x > Math.floor(MAX_VOXEL_VOLUME / y / z)
+  ) {
+    fail("content_structure_invalid", "The level voxel dimensions are unsafe.");
+  }
+  const volume = x * y * z;
+  reader.skip(volume);
+  reader.skip(volume * 32);
+  const definitions = reader.signedInt();
+  if (definitions < 0 || definitions > MAX_PROP_DEFINITIONS) {
+    fail("content_structure_invalid", "The prop-definition count is unsafe.");
+  }
+  reader.skip(definitions * 128);
+  const propInstances = reader.signedInt();
+  if (propInstances < 0 || propInstances > MAX_PROP_INSTANCES) {
+    fail("content_structure_invalid", "The prop-instance count is unsafe.");
+  }
 }
 
 export function inspectGameImage(bytes: Uint8Array): GameImageInfo {
@@ -514,6 +677,7 @@ export async function inspectLevelBundle(
   if (contentSha256 !== manifest.contentSha256) {
     fail("content_checksum_invalid", "level.bin does not match contentSha256.");
   }
+  await inspectLevelContentStructure(entries.content);
 
   let thumbnailInfo: GameImageInfo | undefined;
   if (entries.contentImage !== undefined) inspectGameImage(entries.contentImage);

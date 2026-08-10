@@ -25,6 +25,52 @@ export interface MockSessionResponse {
   tokenType: "Bearer";
 }
 
+export interface DeviceSessionResponse {
+  deviceSessionId: string;
+  deviceSecret: string;
+  userCode: string;
+  activationPath: string;
+  expiresAt: string;
+  pollIntervalSeconds: number;
+}
+
+export interface SessionTokenResponse {
+  tokenType: "Bearer";
+  accessToken: string;
+  expiresInSeconds: number;
+  refreshToken: string;
+  refreshExpiresInSeconds: number;
+  scope: string;
+}
+
+export type UploadStatus =
+  | "reserved"
+  | "uploaded"
+  | "validating"
+  | "published"
+  | "rejected"
+  | "cancelled"
+  | "expired";
+
+export interface UploadReservationResponse {
+  requestId: string;
+  uploadId: string;
+  status: UploadStatus;
+  bundleUploadPath: string;
+  statusPath: string;
+  expiresAt: string;
+}
+
+export interface UploadStatusResponse {
+  requestId: string;
+  uploadId: string;
+  status: UploadStatus;
+  mapId?: string;
+  revision?: number;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
 export interface MapThumbnail {
   url: string;
   sizeBytes: number;

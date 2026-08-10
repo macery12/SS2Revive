@@ -1,6 +1,4 @@
 import { isSha256, MAX_BUNDLE_BYTES, MAX_IMAGE_BYTES } from "@ss2revive/community-contracts";
-import type { RuntimeConfig } from "./config";
-import { completeDownload, reserveDownload } from "./download-quota";
 import { emptyResponse, HttpError, responseHeaders } from "./http";
 import { downloadableVersion, type MapRow } from "./maps";
 
@@ -70,13 +68,10 @@ function objectMetadata(row: MapRow, kind: "bundle" | "thumbnail"): {
 export async function downloadObject(
   request: Request,
   env: Env,
-  config: RuntimeConfig,
-  steamId64: string,
   mapId: string,
   revision: number,
   kind: "bundle" | "thumbnail",
   requestId: string,
-  nowMs: number,
 ): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") {
     throw new HttpError(405, "method_not_allowed", "The method is not allowed.", { Allow: "GET, HEAD" });
@@ -115,7 +110,7 @@ export async function downloadObject(
   const contentLength = range?.length ?? metadata.size;
   const headers = responseHeaders(requestId, {
     "Accept-Ranges": "bytes",
-    "Cache-Control": "private, max-age=31536000, immutable",
+    "Cache-Control": "public, max-age=31536000, immutable",
     "Content-Length": String(contentLength),
     "Content-Type": metadata.contentType,
     ETag: etag,
@@ -134,36 +129,5 @@ export async function downloadObject(
   if (object === null || object.size !== metadata.size || object.customMetadata?.sha256 !== metadata.sha256) {
     throw new HttpError(503, "object_metadata_mismatch", "The stored object failed its metadata check.", { "Retry-After": "30" });
   }
-  const lease = await reserveDownload(env, config, steamId64, contentLength, nowMs);
-  const reader = object.body.getReader();
-  let settled = false;
-  const settle = async (): Promise<void> => {
-    if (settled) return;
-    settled = true;
-    await completeDownload(env, lease);
-  };
-  const body = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        const result = await reader.read();
-        if (result.done) {
-          await settle();
-          controller.close();
-        } else {
-          controller.enqueue(result.value);
-        }
-      } catch (error) {
-        controller.error(error);
-        await settle();
-      }
-    },
-    async cancel(reason) {
-      try {
-        await reader.cancel(reason);
-      } finally {
-        await settle();
-      }
-    },
-  });
-  return new Response(body, { status, headers });
+  return new Response(object.body, { status, headers });
 }

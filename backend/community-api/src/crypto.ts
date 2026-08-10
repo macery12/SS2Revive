@@ -71,21 +71,24 @@ export async function issueAccessToken(
   steamId64: string,
   sessionId: string,
   nowMs: number,
-): Promise<{ token: string; expiresAtMs: number }> {
+): Promise<{ token: string; expiresAtMs: number; scope: string }> {
   const header = base64UrlEncode(encoder.encode(JSON.stringify({ alg: "HS256", typ: "JWT" })));
   const expiresAtMs = nowMs + 15 * 60 * 1000;
+  const scope = config.publisherSteamIds.has(steamId64)
+    ? "maps:read maps:download maps:upload"
+    : "maps:read maps:download";
   const claims: AccessClaims = {
     iss: config.issuer,
     aud: config.audience,
     sub: steamId64,
     sid: sessionId,
-    scope: "maps:read maps:download",
+    scope,
     iat: Math.floor(nowMs / 1000),
     exp: Math.floor(expiresAtMs / 1000),
   };
   const payload = base64UrlEncode(encoder.encode(JSON.stringify(claims)));
   const signature = base64UrlEncode(await hmac(config.authSecret, `${header}.${payload}`));
-  return { token: `${header}.${payload}.${signature}`, expiresAtMs };
+  return { token: `${header}.${payload}.${signature}`, expiresAtMs, scope };
 }
 
 export async function verifyAccessToken(

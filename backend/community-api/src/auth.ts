@@ -39,6 +39,7 @@ function tokenResponse(
   accessExpiresAtMs: number,
   refreshToken: string,
   nowMs: number,
+  scope: string,
 ): Record<string, unknown> {
   return {
     tokenType: "Bearer",
@@ -46,7 +47,7 @@ function tokenResponse(
     expiresInSeconds: Math.max(0, Math.floor((accessExpiresAtMs - nowMs) / 1000)),
     refreshToken,
     refreshExpiresInSeconds: Math.floor(LOGIN_SESSION_LIFETIME_MS / 1000),
-    scope: "maps:read maps:download",
+    scope,
   };
 }
 
@@ -169,7 +170,7 @@ export async function pollDeviceSession(
     throw new HttpError(409, "device_session_consumed", "The device session is no longer available.");
   }
   const access = await issueAccessToken(config, row.steam_id64, sessionId, nowMs);
-  return jsonResponse(tokenResponse(access.token, access.expiresAtMs, refreshToken, nowMs), 200, requestId);
+  return jsonResponse(tokenResponse(access.token, access.expiresAtMs, refreshToken, nowMs, access.scope), 200, requestId);
 }
 
 async function refreshRow(env: Env, config: RuntimeConfig, refreshToken: string): Promise<RefreshTokenRow | null> {
@@ -248,7 +249,7 @@ export async function refreshSession(
     throw new HttpError(401, "token_invalid", "The refresh-token family was revoked.");
   }
   const access = await issueAccessToken(config, row.steam_id64, row.session_id, nowMs);
-  return jsonResponse(tokenResponse(access.token, access.expiresAtMs, nextToken, nowMs), 200, requestId);
+  return jsonResponse(tokenResponse(access.token, access.expiresAtMs, nextToken, nowMs, access.scope), 200, requestId);
 }
 
 export async function logoutSession(
@@ -271,7 +272,7 @@ export async function authenticate(
   request: Request,
   env: Env,
   config: RuntimeConfig,
-  requiredScope: "maps:read" | "maps:download",
+  requiredScope: "maps:read" | "maps:download" | "maps:upload",
   nowMs: number,
 ): Promise<AuthPrincipal> {
   const authorization = request.headers.get("Authorization");

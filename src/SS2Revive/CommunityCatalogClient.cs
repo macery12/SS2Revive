@@ -11,9 +11,8 @@ using SS2ReviveData;
 namespace SS2Revive
 {
     /// <summary>
-    /// Read-only client for a curated static map catalogue. There is no upload endpoint, account,
-    /// or executable service: one bounded JSON file and its relative objects can live on GitHub
-    /// Pages, a release CDN, R2, or any ordinary HTTPS host.
+    /// Read-only client for the public community-map catalogue. Browsing and downloading published
+    /// maps intentionally require no account; authenticated upload is a separate API boundary.
     /// </summary>
     internal static class CommunityCatalogClient
     {
@@ -25,6 +24,8 @@ namespace SS2Revive
 
         private static readonly object Gate = new object();
         private static readonly object ObjectCacheGate = new object();
+        private static readonly Dictionary<string, int> ConfirmedPublished =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(10);
 
         private static UgcStore _store;
@@ -38,9 +39,16 @@ namespace SS2Revive
 
         internal static bool Enabled => _catalogUri != null;
 
+        internal static void ForceRefresh()
+        {
+            lock (Gate) _lastRefreshUtc = DateTime.MinValue;
+            EnsureRefresh(false);
+        }
+
         internal static void Initialise(UgcStore store, string configuredUrl)
         {
             _store = store;
+            lock (Gate) ConfirmedPublished.Clear();
             Uri catalogUri;
             if (store == null || string.IsNullOrWhiteSpace(configuredUrl)) return;
             if (!Uri.TryCreate(configuredUrl.Trim(), UriKind.Absolute, out catalogUri)
@@ -95,6 +103,33 @@ namespace SS2Revive
                     result.RemoveAt(i);
             }
             return result;
+        }
+
+        internal static void NotePublished(string mapId, int revision)
+        {
+            Guid parsed;
+            if (!Guid.TryParse(mapId, out parsed) || revision < 1) return;
+            lock (Gate)
+            {
+                int current;
+                var id = parsed.ToString();
+                if (!ConfirmedPublished.TryGetValue(id, out current) || revision > current)
+                    ConfirmedPublished[id] = revision;
+            }
+        }
+
+        internal static bool IsPublishedMap(string mapId)
+        {
+            if (string.IsNullOrEmpty(mapId)) return false;
+            lock (Gate)
+            {
+                if (ConfirmedPublished.ContainsKey(mapId)) return true;
+                if (_catalog == null) return false;
+                for (var i = 0; i < _catalog.Entries.Count; i++)
+                    if (string.Equals(_catalog.Entries[i].Id, mapId,
+                                      StringComparison.OrdinalIgnoreCase)) return true;
+                return false;
+            }
         }
 
         internal static string ContentKey(CommunityCatalogEntry entry) =>
@@ -285,6 +320,8 @@ namespace SS2Revive
                     if (!CommunityCatalog.TryParse(bytes, out parsed, out warning))
                         throw new InvalidDataException(warning ?? "The catalogue is invalid.");
                     lock (Gate) _catalog = parsed;
+                    UgcBackend.ReconcileCommunityPublications(parsed.Entries);
+                    Dispatcher.NextFrame(SharingPatches.RefreshCurrentCreateScreen);
                     WriteAtomic(_catalogCacheFile, bytes);
                     if (!string.IsNullOrEmpty(warning))
                         Plugin.Log.LogWarning("Community catalogue: " + warning);
@@ -316,6 +353,8 @@ namespace SS2Revive
                 if (CommunityCatalog.TryParse(bytes, out parsed, out warning))
                 {
                     lock (Gate) _catalog = parsed;
+                    UgcBackend.ReconcileCommunityPublications(parsed.Entries);
+                    Dispatcher.NextFrame(SharingPatches.RefreshCurrentCreateScreen);
                     Plugin.Log.LogInfo("Loaded " + parsed.Entries.Count + " cached community map(s)." );
                 }
             }

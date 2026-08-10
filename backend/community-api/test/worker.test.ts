@@ -42,6 +42,7 @@ async function seed(): Promise<void> {
 
 beforeEach(async () => {
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM map_uploads"),
     env.DB.prepare("DELETE FROM download_leases"),
     env.DB.prepare("DELETE FROM download_usage_daily"),
     env.DB.prepare("DELETE FROM steam_openid_sessions"),
@@ -57,6 +58,16 @@ beforeEach(async () => {
 });
 
 describe("Phase 0 Worker", () => {
+  it("keeps upload reservations behind bearer authentication", async () => {
+    const response = await fetchApi("/v1/uploads", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sizeBytes: 100, sha256: "a".repeat(64) }),
+    });
+    expect(response.status).toBe(401);
+    expect(await json(response)).toMatchObject({ error: { code: "auth_required" } });
+  });
+
   it("returns only shallow health and security headers", async () => {
     const response = await fetchApi("/health");
     expect(response.status).toBe(200);
@@ -66,11 +77,13 @@ describe("Phase 0 Worker", () => {
     expect(response.headers.get("X-Request-Id")).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it("requires authentication before map metadata", async () => {
+  it("serves published map metadata publicly while keeping account data authenticated", async () => {
     const response = await fetchApi("/v1/maps");
-    expect(response.status).toBe(401);
-    expect(response.headers.get("WWW-Authenticate")).toContain("Bearer");
-    expect((await json<{ error: { code: string } }>(response)).error.code).toBe("auth_required");
+    expect(response.status).toBe(200);
+    expect(await json(response)).toMatchObject({ items: [], nextCursor: null });
+    const me = await fetchApi("/v1/me");
+    expect(me.status).toBe(401);
+    expect(me.headers.get("WWW-Authenticate")).toContain("Bearer");
   });
 
   it("supports pending, approval, one-time consumption, and /me", async () => {
@@ -129,42 +142,46 @@ describe("Phase 0 Worker", () => {
 
   it("lists, filters, details, and downloads the seeded bundle", async () => {
     await seed();
-    const tokens = await accessToken();
-    const headers = { Authorization: `Bearer ${tokens.accessToken}` };
-    const list = await fetchApi("/v1/maps?players=1&tag=TEAM_COOP&query=Phase&limit=1", { headers });
+    const list = await fetchApi("/v1/maps?players=1&tag=TEAM_COOP&query=Phase&limit=1");
     expect(list.status).toBe(200);
     const page = await json<{ items: Array<{ id: string; thumbnail: { url: string }; downloadUrl: string }> }>(list);
     expect(page.items).toHaveLength(1);
     expect(page.items[0]?.id).toBe("1a658233-92c5-4b63-87fc-4740c855730b");
     expect(page.items[0]?.thumbnail.url).toContain("/versions/1/thumbnail");
 
-    const detail = await fetchApi(`/v1/maps/${page.items[0]!.id}`, { headers });
+    const detail = await fetchApi(`/v1/maps/${page.items[0]!.id}`);
     expect(detail.status).toBe(200);
+    const catalog = await fetchApi("/v1/catalog");
+    expect(catalog.status).toBe(200);
+    expect(catalog.headers.get("Cache-Control")).toContain("public");
+    const catalogBody = await json<{ schemaVersion: number; maps: Array<{ bundleKey: string }> }>(catalog);
+    expect(catalogBody.schemaVersion).toBe(1);
+    expect(catalogBody.maps[0]?.bundleKey).toBe(page.items[0]!.downloadUrl.slice(4));
     const downloadPath = page.items[0]!.downloadUrl;
-    const full = await fetchApi(downloadPath, { headers });
+    const full = await fetchApi(downloadPath);
     expect(full.status).toBe(200);
     const bytes = new Uint8Array(await full.arrayBuffer());
     expect(bytes.length).toBe(Number(full.headers.get("Content-Length")));
     expect(new TextDecoder().decode(bytes.slice(0, 16))).toBe("SS2REVIVE LEVEL\n");
     const etag = full.headers.get("ETag")!;
 
-    const head = await fetchApi(downloadPath, { method: "HEAD", headers });
+    const head = await fetchApi(downloadPath, { method: "HEAD" });
     expect(head.status).toBe(200);
     expect((await head.arrayBuffer()).byteLength).toBe(0);
     expect(head.headers.get("ETag")).toBe(etag);
 
-    const partial = await fetchApi(downloadPath, { headers: { ...headers, Range: "bytes=0-15", "If-Range": etag } });
+    const partial = await fetchApi(downloadPath, { headers: { Range: "bytes=0-15", "If-Range": etag } });
     expect(partial.status).toBe(206);
     expect(partial.headers.get("Content-Range")).toBe(`bytes 0-15/${bytes.length}`);
     expect(new Uint8Array(await partial.arrayBuffer())).toEqual(bytes.slice(0, 16));
 
-    const notModified = await fetchApi(downloadPath, { headers: { ...headers, "If-None-Match": etag } });
+    const notModified = await fetchApi(downloadPath, { headers: { "If-None-Match": etag } });
     expect(notModified.status).toBe(304);
     const rangedNotModified = await fetchApi(downloadPath, {
-      headers: { ...headers, Range: "bytes=0-15", "If-None-Match": etag },
+      headers: { Range: "bytes=0-15", "If-None-Match": etag },
     });
     expect(rangedNotModified.status).toBe(304);
-    const invalidRange = await fetchApi(downloadPath, { headers: { ...headers, Range: "bytes=0-1,4-5" } });
+    const invalidRange = await fetchApi(downloadPath, { headers: { Range: "bytes=0-1,4-5" } });
     expect(invalidRange.status).toBe(416);
   });
 
@@ -193,20 +210,18 @@ describe("Phase 0 Worker", () => {
            FROM map_versions WHERE map_id = ? AND revision = 1`,
       ).bind(secondId, "1a658233-92c5-4b63-87fc-4740c855730b"),
     ]);
-    const tokens = await accessToken();
-    const headers = { Authorization: `Bearer ${tokens.accessToken}` };
-    const first = await fetchApi("/v1/maps?limit=1", { headers });
+    const first = await fetchApi("/v1/maps?limit=1");
     const page = await json<{ items: unknown[]; nextCursor: string }>(first);
     expect(page.items).toHaveLength(1);
     expect(page.nextCursor).toBeTruthy();
-    const next = await fetchApi(`/v1/maps?limit=1&cursor=${encodeURIComponent(page.nextCursor)}`, { headers });
+    const next = await fetchApi(`/v1/maps?limit=1&cursor=${encodeURIComponent(page.nextCursor)}`);
     expect(next.status).toBe(200);
     const tamperedCursor = `${page.nextCursor.slice(0, -1)}${page.nextCursor.endsWith("A") ? "B" : "A"}`;
-    const tampered = await fetchApi(`/v1/maps?limit=1&cursor=${encodeURIComponent(tamperedCursor)}`, { headers });
+    const tampered = await fetchApi(`/v1/maps?limit=1&cursor=${encodeURIComponent(tamperedCursor)}`);
     expect(tampered.status).toBe(400);
-    const ambiguous = await fetchApi("/v1//maps", { headers });
+    const ambiguous = await fetchApi("/v1//maps");
     expect(ambiguous.status).toBe(400);
-    const encoded = await fetchApi("/v1/%6daps", { headers });
+    const encoded = await fetchApi("/v1/%6daps");
     expect(encoded.status).toBe(400);
   });
 
@@ -215,10 +230,8 @@ describe("Phase 0 Worker", () => {
     await env.DB.prepare(
       "UPDATE map_versions SET bundle_key = 'approved/maps/another-object.ss2level' WHERE map_id = ? AND revision = 1",
     ).bind("1a658233-92c5-4b63-87fc-4740c855730b").run();
-    const tokens = await accessToken();
     const response = await fetchApi(
       "/v1/maps/1a658233-92c5-4b63-87fc-4740c855730b/versions/1/download",
-      { headers: { Authorization: `Bearer ${tokens.accessToken}` } },
     );
     expect(response.status).toBe(503);
     expect((await json<{ error: { code: string } }>(response)).error.code).toBe("object_metadata_mismatch");

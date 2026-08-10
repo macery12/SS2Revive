@@ -13,7 +13,8 @@
     "MOCK_STEAM_ID64": "76561198145479980",
     "PUBLIC_ORIGIN": "http://127.0.0.1:8787",
     "DOWNLOAD_DAILY_BYTES": "2147483648",
-    "DOWNLOAD_CONCURRENCY": "3"
+    "DOWNLOAD_CONCURRENCY": "3",
+    "PUBLISHER_STEAM_IDS": "76561198145479980"
   },
   "d1_databases": [
     {
@@ -36,6 +37,14 @@
       {
         "binding": "VALIDATION_QUEUE",
         "queue": "ss2revive-validation-local"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "ss2revive-validation-local",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 5
       }
     ]
   },

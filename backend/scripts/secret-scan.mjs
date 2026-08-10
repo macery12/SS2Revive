@@ -4,7 +4,7 @@ import process from "node:process";
 
 const root = path.resolve(import.meta.dirname, "..");
 const ignoredDirectories = new Set(["node_modules", ".wrangler", "coverage", "dist", ".git"]);
-const ignoredFiles = new Set(["pnpm-lock.yaml", "secret-scan.mjs", ".dev.vars"]);
+const ignoredFiles = new Set(["pnpm-lock.yaml", "secret-scan.mjs", ".dev.vars", ".env"]);
 const findings = [];
 const patterns = [
   ["private key", /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/],
@@ -24,6 +24,9 @@ async function walk(directory) {
       continue;
     }
     if (!entry.isFile() || ignoredFiles.has(entry.name)) continue;
+    // Local environment files are supposed to contain secrets and are ignored by Git. Keep
+    // scanning example/template variants, where only visibly delimited placeholders are allowed.
+    if (entry.name.startsWith(".env.") && !entry.name.endsWith(".example")) continue;
     const relative = path.relative(root, fullPath);
     const text = await readFile(fullPath, "utf8").catch(() => null);
     if (text === null) continue;

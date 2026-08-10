@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Data;
 using HarmonyLib;
 using Services;
@@ -9,7 +10,9 @@ using UnityEngine.UI;
 namespace SS2Revive
 {
     /// <summary>
-    /// The two buttons that make <see cref="LevelSharing"/> reachable without leaving the game.
+    /// Entry points that make local sharing and online publication reachable without leaving the
+    /// game. Folder import remains automatic; online publication uses a normal level action and a
+    /// full-size overlay rather than cloning the Create screen's oversized video button.
     ///
     /// Export takes over the Share button rather than the Publish button, which is the opposite of
     /// the obvious choice and the right one. The terminal already shows exactly one of the two at a
@@ -23,15 +26,12 @@ namespace SS2Revive
     /// code for a level nobody else could obtain - the one button here that genuinely had nowhere
     /// left to point.
     ///
-    /// Import has no button to take over, so it gets a new one cloned from the training videos
-    /// button beside it. That clone is the fragile part of this file - it depends on a prefab's
-    /// layout rather than on a method signature - so the import folder is also scanned silently
-    /// every time the Create screen opens. If the button never appears, dropping a file in the
-    /// folder and opening Create still works.
+    /// Import is scanned silently whenever Create opens. The previous cloned training-video button
+    /// was intentionally removed because its large tile was the wrong interaction for publication.
     /// </summary>
     internal static class SharingPatches
     {
-        private const string ImportButtonName = "SS2ReviveImportButton";
+        private const string OnlinePublishButtonName = "SS2ReviveOnlinePublishButton";
 
         /// <summary>
         /// The Create screen currently open, so the Import button can redraw it. The button's
@@ -39,6 +39,7 @@ namespace SS2Revive
         /// and there is only ever one of these screens.
         /// </summary>
         private static TerminalCreateScreen _screen;
+        private static TerminalLevelModalController _publishModal;
 
         internal static void Apply(Harmony harmony)
         {
@@ -64,11 +65,11 @@ namespace SS2Revive
                     AccessTools.Method(typeof(SharingPatches), nameof(DisplayLevelData_Postfix))));
             });
 
-            PatchSet.Try("TerminalCreateScreen.SetupNavigation -> include Import", () =>
+            PatchSet.Try("TerminalUIController.DisableUI -> close community publish overlay", () =>
             {
-                var target = PatchSet.Method(typeof(TerminalCreateScreen), "SetupNavigation");
-                harmony.Patch(target, null, new HarmonyMethod(
-                    AccessTools.Method(typeof(SharingPatches), nameof(SetupNavigation_Postfix))));
+                var target = PatchSet.Method(typeof(TerminalUIController), "DisableUI");
+                harmony.Patch(target, new HarmonyMethod(
+                    AccessTools.Method(typeof(SharingPatches), nameof(TerminalDisabled_Prefix))));
             });
         }
 
@@ -92,6 +93,7 @@ namespace SS2Revive
                 if (summary == null) return;
 
                 ConfigureInstalledActions(__instance, summary);
+                EnsureOnlinePublishButton(__instance, summary);
                 if (summary.LevelStatus != UGCApi.EStatus.Draft) return;
 
                 var inCreateMode = AccessTools
@@ -153,6 +155,79 @@ namespace SS2Revive
                     ?.GetValue(modal) as Button;
                 if (report != null) report.gameObject.SetActive(false);
             }
+        }
+
+        private static void TerminalDisabled_Prefix() => CommunityPublishOverlay.HideActive();
+
+        private static void EnsureOnlinePublishButton(TerminalLevelModalController modal,
+                                                      LevelSummaryData summary)
+        {
+            var template = AccessTools.Field(typeof(TerminalLevelModalController), "_editButton")
+                ?.GetValue(modal) as ExtendedButton;
+            if (template == null || template.transform.parent == null) return;
+
+            var parent = template.transform.parent;
+            var existing = parent.Find(OnlinePublishButtonName);
+            ExtendedButton button;
+            if (existing == null)
+            {
+                var clone = UnityEngine.Object.Instantiate(template.gameObject, parent);
+                clone.name = OnlinePublishButtonName;
+                clone.transform.SetSiblingIndex(template.transform.GetSiblingIndex() + 1);
+                button = clone.GetComponent<ExtendedButton>();
+                if (button == null)
+                {
+                    UnityEngine.Object.Destroy(clone);
+                    return;
+                }
+                button.onClick = new Button.ButtonClickedEvent();
+                button.OnPointerClickButton = OnlinePublishClicked;
+                button.OnPointerEnterButton = null;
+                button.OnPointerExitButton = null;
+                StripLocalisation(clone);
+                SetLabel(button, "PUBLISH ONLINE");
+
+                var buttons = AccessTools.Field(typeof(TerminalLevelModalController), "_buttons")
+                    ?.GetValue(modal) as List<ExtendedButton>;
+                if (buttons != null && !buttons.Contains(button)) buttons.Add(button);
+
+                if (parent.GetComponent<LayoutGroup>() == null)
+                {
+                    var rect = clone.transform as RectTransform;
+                    var source = template.transform as RectTransform;
+                    if (rect != null && source != null)
+                        rect.anchoredPosition = source.anchoredPosition
+                                                + new Vector2(source.rect.width + 8f, 0f);
+                }
+            }
+            else
+            {
+                button = existing.GetComponent<ExtendedButton>();
+            }
+            if (button == null) return;
+
+            var inCreateMode = AccessTools.Field(typeof(TerminalLevelModalController), "_isInCreateMode")
+                ?.GetValue(modal) as bool? ?? false;
+            var localPlayer = Shell.Instance.GetLocalPlayerService().GetPlayerId(0);
+            var ownsLevel = summary.creatorPlayerIds != null && summary.creatorPlayerIds.Contains(localPlayer);
+            var visible = Plugin.LevelSharingEnabled.Value && inCreateMode && ownsLevel
+                          && !UgcBackend.IsImported(summary.serverLevelId)
+                          && !string.IsNullOrEmpty(summary.serverLevelId);
+            button.gameObject.SetActive(visible);
+            button.interactable = visible;
+            if (visible) _publishModal = modal;
+        }
+
+        private static void OnlinePublishClicked(ExtendedButton ignored)
+        {
+            var modal = _publishModal;
+            var summary = modal == null ? null : CurrentLevel(modal);
+            if (modal == null || summary == null)
+            {
+                TerminalMessage.Show("No saved level is selected for publication.", isWarning: true);
+                return;
+            }
+            CommunityPublishOverlay.Show(modal, summary);
         }
 
         // ------------------------------------------------------------------ export
@@ -234,15 +309,6 @@ namespace SS2Revive
                 Plugin.Log.LogError("Scanning the import folder threw: " + ex);
             }
 
-            try
-            {
-                EnsureImportButton(__instance);
-            }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogError("Could not add the Import button; the import folder is still "
-                                    + "scanned when this screen opens. " + ex);
-            }
         }
 
         private static void OnImportClicked(ExtendedButton button)
@@ -291,6 +357,11 @@ namespace SS2Revive
             }
         }
 
+        internal static void RefreshCurrentCreateScreen()
+        {
+            if (_screen != null) Refresh(_screen);
+        }
+
         private static void OpenImportFolder()
         {
             if (LevelSharing.ImportDirectory == null) return;
@@ -305,111 +376,11 @@ namespace SS2Revive
             }
         }
 
-        // -------------------------------------------------------------- the button
-
-        /// <summary>
-        /// Clones the training videos button into an Import button beside it.
-        ///
-        /// Cloning rather than building one from nothing is what keeps it looking like the rest of
-        /// the terminal: the prefab carries the font, the colours, the hover and click sounds and
-        /// the selection behaviour, none of which are worth reproducing by hand.
-        ///
-        /// Identified by name rather than by a field, because the screen is entered and left
-        /// repeatedly and the clone outlives a single visit. Finding one already there is the
-        /// normal case after the first time.
-        /// </summary>
-        private static void EnsureImportButton(TerminalCreateScreen screen)
-        {
-            var template = AccessTools.Field(typeof(TerminalCreateScreen), "_trainingVideosButton")
-                ?.GetValue(screen) as ExtendedButton;
-
-            if (template == null)
-            {
-                Plugin.Log.LogWarning("No button to clone for Import; the import folder is still "
-                                      + "scanned when the Create screen opens.");
-                return;
-            }
-
-            var parent = template.transform.parent;
-            if (parent == null || parent.Find(ImportButtonName) != null) return;
-
-            var clone = UnityEngine.Object.Instantiate(template.gameObject, parent);
-            clone.name = ImportButtonName;
-            clone.transform.SetSiblingIndex(template.transform.GetSiblingIndex() + 1);
-
-            var button = clone.GetComponent<ExtendedButton>();
-            if (button == null)
-            {
-                UnityEngine.Object.Destroy(clone);
-                return;
-            }
-
-            // Instantiate carries serialised state across, and onClick is serialised. The delegate
-            // the screen installs is not, so the clone starts with no handler of its own and would
-            // otherwise inherit only the template's persistent listeners - the training videos URL.
-            button.onClick = new Button.ButtonClickedEvent();
-            button.OnPointerClickButton = OnImportClicked;
-
-            // The stock screen wires controller navigation explicitly for its two header buttons;
-            // a visual clone is otherwise unreachable without a mouse. Preserve the template's
-            // vertical destination and add the clone to its horizontal chain.
-            var templateNavigation = template.navigation;
-            var importNavigation = button.navigation;
-            importNavigation.mode = Navigation.Mode.Explicit;
-            importNavigation.selectOnLeft = template;
-            importNavigation.selectOnDown = templateNavigation.selectOnDown;
-            importNavigation.selectOnUp = templateNavigation.selectOnUp;
-            button.navigation = importNavigation;
-
-            templateNavigation.mode = Navigation.Mode.Explicit;
-            templateNavigation.selectOnRight = button;
-            template.navigation = templateNavigation;
-
-            StripLocalisation(clone);
-            SetLabel(button, "IMPORT");
-
-            // The parent may lay its children out itself, in which case the clone is already in the
-            // right place. Without a layout group it would sit exactly on top of the template.
-            if (parent.GetComponent<LayoutGroup>() == null)
-            {
-                var rect = clone.transform as RectTransform;
-                var source = template.transform as RectTransform;
-                if (rect != null && source != null)
-                {
-                    rect.anchoredPosition = source.anchoredPosition
-                                            - new Vector2(0f, source.rect.height + 8f);
-                }
-            }
-
-            Plugin.Log.LogInfo("Added an Import button to the Create screen.");
-        }
-
-        private static void SetupNavigation_Postfix(TerminalCreateScreen __instance)
-        {
-            var template = AccessTools.Field(typeof(TerminalCreateScreen), "_trainingVideosButton")
-                ?.GetValue(__instance) as ExtendedButton;
-            var clone = template == null || template.transform.parent == null
-                ? null
-                : template.transform.parent.Find(ImportButtonName);
-            var button = clone == null ? null : clone.GetComponent<ExtendedButton>();
-            if (template == null || button == null) return;
-
-            var source = template.navigation;
-            var navigation = button.navigation;
-            navigation.selectOnDown = source.selectOnDown;
-            navigation.selectOnUp = source.selectOnUp;
-            navigation.selectOnLeft = template;
-            button.navigation = navigation;
-
-            source.selectOnRight = button;
-            template.navigation = source;
-        }
-
         /// <summary>
         /// A localised label rewrites itself from a key on enable, which would put the template's
         /// text back over ours. Nothing on this clone needs translating, so the components go.
         /// </summary>
-        private static void StripLocalisation(GameObject clone)
+        internal static void StripLocalisation(GameObject clone)
         {
             var components = clone.GetComponentsInChildren<MonoBehaviour>(true);
             for (var i = 0; i < components.Length; i++)
@@ -428,7 +399,7 @@ namespace SS2Revive
             }
         }
 
-        private static void SetLabel(ExtendedButton button, string label)
+        internal static void SetLabel(ExtendedButton button, string label)
         {
             var text = AccessTools.Field(typeof(ExtendedButton), "_buttonText")
                 ?.GetValue(button) as TextMeshProUGUI;

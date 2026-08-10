@@ -13,7 +13,7 @@ import { downloadObject } from "./downloads";
 import { errorResponse, HttpError, jsonResponse, requireMethod } from "./http";
 import { seedLocalFixture } from "./local-fixture";
 import { cleanupExpiredState } from "./maintenance";
-import { listMaps, mapDetail, mapVersions } from "./maps";
+import { catalogDocument, listMaps, mapDetail, mapVersions } from "./maps";
 import { actorRateKey, anonymousRateKey, enforceRateLimit } from "./rate-limit";
 import {
   confirmSteamLogin,
@@ -21,6 +21,13 @@ import {
   steamActivationPage,
   steamCallback,
 } from "./steam-openid";
+import {
+  cancelUpload,
+  getUploadStatus,
+  putUploadBundle,
+  reserveUpload,
+  validateUploadMessage,
+} from "./uploads";
 
 function safePath(request: Request): string {
   if (request.url.length > 4096) throw new HttpError(414, "invalid_request", "The request URL is too long.");
@@ -69,15 +76,24 @@ async function limitAnonymous(
   await enforceRateLimit(env.AUTH_RATE_LIMITER, await anonymousRateKey(request, config, routeClass));
 }
 
+async function limitPublicRead(
+  request: Request,
+  env: Env,
+  config: ReturnType<typeof runtimeConfig>,
+  routeClass: string,
+  download = false,
+): Promise<void> {
+  const limiter = download ? env.DOWNLOAD_RATE_LIMITER : env.API_RATE_LIMITER;
+  await enforceRateLimit(limiter, await anonymousRateKey(request, config, routeClass));
+}
+
 async function limitActor(
   env: Env,
   config: ReturnType<typeof runtimeConfig>,
   routeClass: string,
   steamId64: string,
-  download = false,
 ): Promise<void> {
-  const limiter = download ? env.DOWNLOAD_RATE_LIMITER : env.API_RATE_LIMITER;
-  await enforceRateLimit(limiter, await actorRateKey(config, routeClass, steamId64));
+  await enforceRateLimit(env.API_RATE_LIMITER, await actorRateKey(config, routeClass, steamId64));
 }
 
 async function localSeed(
@@ -164,10 +180,50 @@ async function route(request: Request, env: Env, requestId: string): Promise<Res
     return jsonResponse({ requestId, steamId64: principal.steamId64, scopes: principal.scopes }, 200, requestId);
   }
 
+  if (path === "/v1/uploads") {
+    requireMethod(request, "POST");
+    const principal = await authenticate(request, env, config, "maps:upload", nowMs);
+    await limitActor(env, config, "upload-reserve", principal.steamId64);
+    return reserveUpload(request, env, config, principal, requestId, nowMs);
+  }
+
+  const uploadBundleMatch = /^\/v1\/uploads\/([^/]+)\/bundle$/u.exec(path);
+  if (uploadBundleMatch !== null) {
+    const principal = await authenticate(request, env, config, "maps:upload", nowMs);
+    await limitActor(env, config, "upload-bytes", principal.steamId64);
+    return putUploadBundle(
+      request,
+      env,
+      config,
+      principal,
+      uploadBundleMatch[1] ?? "",
+      requestId,
+      nowMs,
+    );
+  }
+
+  const uploadMatch = /^\/v1\/uploads\/([^/]+)$/u.exec(path);
+  if (uploadMatch !== null) {
+    const principal = await authenticate(request, env, config, "maps:upload", nowMs);
+    await limitActor(env, config, "upload-status", principal.steamId64);
+    if (request.method === "GET") {
+      return getUploadStatus(request, env, config, principal, uploadMatch[1] ?? "", requestId);
+    }
+    if (request.method === "DELETE") {
+      return cancelUpload(request, env, config, principal, uploadMatch[1] ?? "", requestId, nowMs);
+    }
+    throw new HttpError(405, "method_not_allowed", "The method is not allowed.", { Allow: "GET, DELETE" });
+  }
+
+  if (path === "/v1/catalog") {
+    requireMethod(request, "GET");
+    await limitPublicRead(request, env, config, "catalog");
+    return catalogDocument(env, requestId, nowMs);
+  }
+
   if (path === "/v1/maps") {
     requireMethod(request, "GET");
-    const principal = await authenticate(request, env, config, "maps:read", nowMs);
-    await limitActor(env, config, "maps", principal.steamId64);
+    await limitPublicRead(request, env, config, "maps");
     return listMaps(request, env, config, requestId, nowMs);
   }
 
@@ -178,34 +234,28 @@ async function route(request: Request, env: Env, requestId: string): Promise<Res
     if (!isCanonicalUuid(mapId) || !Number.isSafeInteger(revision)) {
       throw new HttpError(404, "revision_not_found", "The map revision was not found.");
     }
-    const principal = await authenticate(request, env, config, "maps:download", nowMs);
-    await limitActor(env, config, "download", principal.steamId64, true);
+    await limitPublicRead(request, env, config, "download", true);
     return downloadObject(
       request,
       env,
-      config,
-      principal.steamId64,
       mapId,
       revision,
       downloadMatch[3] === "download" ? "bundle" : "thumbnail",
       requestId,
-      nowMs,
     );
   }
 
   const versionsMatch = /^\/v1\/maps\/([^/]+)\/versions$/u.exec(path);
   if (versionsMatch !== null) {
     requireMethod(request, "GET");
-    const principal = await authenticate(request, env, config, "maps:read", nowMs);
-    await limitActor(env, config, "maps", principal.steamId64);
+    await limitPublicRead(request, env, config, "maps");
     return mapVersions(env, versionsMatch[1] ?? "", requestId);
   }
 
   const detailMatch = /^\/v1\/maps\/([^/]+)$/u.exec(path);
   if (detailMatch !== null) {
     requireMethod(request, "GET");
-    const principal = await authenticate(request, env, config, "maps:read", nowMs);
-    await limitActor(env, config, "maps", principal.steamId64);
+    await limitPublicRead(request, env, config, "maps");
     return mapDetail(env, detailMatch[1] ?? "", requestId);
   }
 
@@ -243,5 +293,21 @@ export default {
   },
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(cleanupExpiredState(env, controller.scheduledTime));
+  },
+  async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
+    for (const message of batch.messages) {
+      try {
+        await validateUploadMessage(env, message.body);
+        message.ack();
+      } catch (error) {
+        console.error(JSON.stringify({
+          event: "upload_validation_failed",
+          messageId: message.id,
+          attempt: message.attempts,
+          name: error instanceof Error ? error.name : "unknown",
+        }));
+        message.retry({ delaySeconds: Math.min(300, 10 * Math.max(1, message.attempts)) });
+      }
+    }
   },
 } satisfies ExportedHandler<Env>;

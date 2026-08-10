@@ -11,6 +11,7 @@ export interface RuntimeConfig {
   publicOrigin: string;
   downloadDailyBytes: number;
   downloadConcurrency: number;
+  publisherSteamIds: ReadonlySet<string>;
 }
 
 function isBase64Secret(value: unknown): value is string {
@@ -72,6 +73,21 @@ export function runtimeConfig(env: Env): RuntimeConfig {
   if (downloadDailyBytes === null || downloadConcurrency === null) {
     throw new HttpError(503, "temporarily_unavailable", "The download quota configuration is invalid.");
   }
+  if (typeof env.PUBLISHER_STEAM_IDS !== "string" || env.PUBLISHER_STEAM_IDS.length > 1024) {
+    throw new HttpError(503, "temporarily_unavailable", "The publisher configuration is invalid.");
+  }
+  const publisherSteamIds = new Set<string>();
+  for (const value of env.PUBLISHER_STEAM_IDS.split(",")) {
+    const steamId64 = value.trim();
+    if (steamId64 === "") continue;
+    if (!isSteamId64(steamId64)) {
+      throw new HttpError(503, "temporarily_unavailable", "The publisher configuration is invalid.");
+    }
+    publisherSteamIds.add(steamId64);
+  }
+  if (publisherSteamIds.size === 0) {
+    throw new HttpError(503, "temporarily_unavailable", "No map publisher is configured.");
+  }
   return {
     environment: env.ENVIRONMENT,
     allowMockAuth,
@@ -82,5 +98,6 @@ export function runtimeConfig(env: Env): RuntimeConfig {
     publicOrigin: env.PUBLIC_ORIGIN,
     downloadDailyBytes,
     downloadConcurrency,
+    publisherSteamIds,
   };
 }

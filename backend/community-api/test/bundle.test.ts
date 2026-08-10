@@ -25,6 +25,51 @@ describe("Level bundle contract", () => {
     expect(parsed.code).toBe("M4JlGsWSY0uH_EdAyFVzCw");
     expect(parsed.bundleSha256).toBe(fixture.sha256);
     expect(parsed.thumbnailInfo).toMatchObject({ width: 1, height: 1, format: 4, dataLength: 4 });
+    expect(parsed.manifest.configurations).toEqual([{
+      id: "5f3ff27f-126f-43b3-999f-e55cd44f4a27",
+      numberPlayers: 1,
+      numberTeams: 1,
+      teamMode: "COOP",
+      levelTeamConfigurations: [{ objectives: [""], playersInTeam: [] }],
+    }]);
+    expect(parsed.manifest.validations).toEqual([{
+      id: "f9dab629-2372-4eb3-b24a-063f382f6043",
+      description: "Local deterministic fixture",
+      validated: false,
+    }]);
+  });
+
+  it("rejects unknown configuration fields without rejecting the game's complete schema", async () => {
+    await expect(buildLocalFixture({
+      configurations: [{
+        id: "5f3ff27f-126f-43b3-999f-e55cd44f4a27",
+        numberPlayers: 1,
+        numberTeams: 1,
+        teamMode: "COOP",
+        levelTeamConfigurations: [{ objectives: [], playersInTeam: [0] }],
+        unexpected: true,
+      }],
+    })).rejects.toMatchObject({ code: "manifest_metadata_invalid" });
+  });
+
+  it("rejects unknown team modes and non-boolean validation state", async () => {
+    await expect(buildLocalFixture({
+      configurations: [{
+        id: "5f3ff27f-126f-43b3-999f-e55cd44f4a27",
+        numberPlayers: 1,
+        numberTeams: 1,
+        teamMode: "UNKNOWN",
+        levelTeamConfigurations: [],
+      }],
+    })).rejects.toMatchObject({ code: "manifest_metadata_invalid" });
+
+    await expect(buildLocalFixture({
+      validations: [{
+        id: "f9dab629-2372-4eb3-b24a-063f382f6043",
+        description: "Local deterministic fixture",
+        validated: "false",
+      }],
+    })).rejects.toMatchObject({ code: "manifest_metadata_invalid" });
   });
 
   it("rejects truncation, trailing bytes, and checksum tampering", async () => {

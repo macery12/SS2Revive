@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security.Cryptography;
 using SS2ReviveData;
 
 namespace SS2Revive
@@ -50,6 +51,16 @@ namespace SS2Revive
 
         internal static bool Available => ExportDirectory != null && UgcBackend.Store != null;
 
+        internal sealed class UploadPackage
+        {
+            internal string Path;
+            internal string Code;
+            internal string LevelId;
+            internal int Revision;
+            internal long SizeBytes;
+            internal string Sha256;
+        }
+
         internal static void Initialise(string saveDirectory)
         {
             try
@@ -91,23 +102,29 @@ namespace SS2Revive
         /// </summary>
         internal static bool Export(string serverLevelId, out string code, out string message)
         {
-            code = string.Empty;
-            message = null;
+            UploadPackage package;
+            var result = PrepareUpload(serverLevelId, out package, out message);
+            code = package == null ? string.Empty : package.Code;
+            return result;
+        }
 
+        internal static bool PrepareUpload(string serverLevelId, out UploadPackage package,
+                                           out string message)
+        {
+            package = null;
+            message = null;
             var store = UgcBackend.Store;
             if (store == null || ExportDirectory == null)
             {
                 message = "The level library is not open, so nothing can be exported.";
                 return false;
             }
-
             var level = store.Get(serverLevelId);
             if (level == null)
             {
                 message = "That level is not in this machine's library.";
                 return false;
             }
-
             string error;
             var bundle = LevelBundle.FromLevel(level, store.ReadKey, out error);
             if (bundle == null)
@@ -115,29 +132,51 @@ namespace SS2Revive
                 message = error ?? "The level could not be read.";
                 return false;
             }
-
             bundle.ReviveVersion = Plugin.PluginVersion;
-
-            var fileName = bundle.SuggestedFileName();
-            var path = Path.Combine(ExportDirectory, fileName);
-
+            if (!LevelFormatGuard.ValidateForPublication(bundle.Content, out error))
+            {
+                message = error ?? "The level failed the protected format-29 preflight.";
+                return false;
+            }
             try
             {
-                AtomicFile.WriteAllBytes(path, bundle.Pack());
+                var bytes = bundle.Pack();
+                if (bytes == null || bytes.Length < 1 || bytes.Length > LevelBundle.MaxBundleBytes)
+                {
+                    message = "The package is empty or exceeds the upload limit.";
+                    return false;
+                }
+                var path = Path.Combine(ExportDirectory, bundle.SuggestedFileName());
+                AtomicFile.WriteAllBytes(path, bytes);
                 RemoveOlderExports(bundle.Code, path);
+                string hash;
+                using (var sha = SHA256.Create()) hash = Hex(sha.ComputeHash(bytes));
+                package = new UploadPackage
+                {
+                    Path = path,
+                    Code = bundle.Code,
+                    LevelId = bundle.Id,
+                    Revision = bundle.ContentVersion,
+                    SizeBytes = bytes.LongLength,
+                    Sha256 = hash,
+                };
+                Plugin.Log.LogInfo("Prepared '" + level.Title + "' (" + level.Id + ") at " + path
+                                   + " for authenticated upload. Share code " + bundle.Code + ".");
+                return true;
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogError("Exporting '" + level.Title + "' failed: " + ex);
-                message = "The file could not be written: " + ex.Message;
+                Plugin.Log.LogError("Preparing '" + level.Title + "' for upload failed: " + ex);
+                message = "The package could not be written: " + ex.Message;
                 return false;
             }
+        }
 
-            code = bundle.Code;
-
-            Plugin.Log.LogInfo("Exported '" + level.Title + "' (" + level.Id + ") to " + path
-                               + ". Share code " + code + ".");
-            return true;
+        private static string Hex(byte[] bytes)
+        {
+            var text = new System.Text.StringBuilder(bytes.Length * 2);
+            for (var i = 0; i < bytes.Length; i++) text.Append(bytes[i].ToString("x2"));
+            return text.ToString();
         }
 
         private static void RemoveOlderExports(string code, string keepPath)

@@ -76,6 +76,8 @@ namespace SS2Revive
                 if (UgcBackend.Available)
                 {
                     UgcPatches.Apply(harmony);
+                    LegacyLevelPatches.Apply(harmony);
+                    CommunityLevelPatches.Apply(harmony);
 
                     // After the library, because export and import are both operations on it and
                     // there is nothing to share without one.

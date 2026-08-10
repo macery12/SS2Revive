@@ -48,7 +48,9 @@ namespace SS2Revive
                 var root = SaveLocation.ResolveDirectory(saveDirectory);
                 _store = new UgcStore(root, message => Plugin.Log.LogWarning("UGC store: " + message));
                 Plugin.Log.LogInfo("Local level library ready: " + _store.Describe());
+                LegacyLevelCatalog.Initialise();
                 CommunityCatalogClient.Initialise(_store, Plugin.CommunityCatalogUrl.Value);
+                CommunityPublishClient.Initialise(_store.Root, Plugin.CommunityCatalogUrl.Value);
             }
             catch (Exception ex)
             {
@@ -176,6 +178,16 @@ namespace SS2Revive
                                        Action<List<UGCApi.AssetImageResponse_SurgeonUgc>> succeeded,
                                        Action failed)
         {
+            if (LegacyLevelCatalog.IsLegacy(serverLevelId))
+            {
+                Defer(() =>
+                {
+                    if (succeeded != null)
+                        succeeded(new List<UGCApi.AssetImageResponse_SurgeonUgc>());
+                });
+                return;
+            }
+
             var level = _store == null ? null : _store.Get(serverLevelId);
             if (level == null) { Defer(failed); return; }
 
@@ -250,6 +262,30 @@ namespace SS2Revive
             return summaries;
         }
 
+        internal static bool ConfirmCommunityPublished(string serverLevelId, int revision)
+        {
+            var level = _store == null ? null : _store.Get(serverLevelId);
+            var latest = level == null ? null : level.LatestContent();
+            if (level == null || level.IsImported || latest == null
+                || latest.ContentVersion != revision) return false;
+            if (string.Equals(level.Status, UgcStore.StatusPublished,
+                              StringComparison.OrdinalIgnoreCase)) return true;
+
+            level.Status = UgcStore.StatusPublished;
+            MarkValidationsComplete(level);
+            _store.Update(level);
+            Plugin.Log.LogInfo("Synchronized community publication for '" + level.Title + "' ("
+                               + level.Id + "), revision " + revision + ".");
+            return true;
+        }
+
+        internal static void ReconcileCommunityPublications(List<CommunityCatalogEntry> entries)
+        {
+            if (entries == null) return;
+            for (var i = 0; i < entries.Count; i++)
+                ConfirmCommunityPublished(entries[i].Id, entries[i].Revision);
+        }
+
         /// <summary>
         /// Merges before paging so the terminal sees one coherent Discover library. Authored local
         /// levels always win an id collision; an installed community map wins while current, and a
@@ -258,6 +294,7 @@ namespace SS2Revive
         private static List<UgcLevelRecord> SearchLocalAndCommunity(UgcQuery query, out int pageCount)
         {
             if (query == null) query = new UgcQuery();
+            var legacyOnly = LegacyLevelCatalog.ApplyBrowseFilter(query);
             var allQuery = new UgcQuery
             {
                 Status = query.Status,
@@ -271,28 +308,36 @@ namespace SS2Revive
                 AnyStatus = query.AnyStatus,
             };
 
-            int ignoredPages;
-            var combined = _store.Search(allQuery, out ignoredPages);
-            var remote = CommunityCatalogClient.Search(allQuery);
-            for (var i = 0; i < remote.Count; i++)
+            List<UgcLevelRecord> combined;
+            if (legacyOnly)
             {
-                var entry = remote[i];
-                var installed = _store.Get(entry.Id);
-                if (installed != null)
+                combined = LegacyLevelCatalog.Search(allQuery);
+            }
+            else
+            {
+                int ignoredPages;
+                combined = _store.Search(allQuery, out ignoredPages);
+                var remote = CommunityCatalogClient.Search(allQuery);
+                for (var i = 0; i < remote.Count; i++)
                 {
-                    if (!installed.IsImported) continue;
-                    var latest = installed.LatestContent();
-                    if (latest != null && latest.ContentVersion >= entry.Revision) continue;
-                    for (var localIndex = combined.Count - 1; localIndex >= 0; localIndex--)
+                    var entry = remote[i];
+                    var installed = _store.Get(entry.Id);
+                    if (installed != null)
                     {
-                        if (string.Equals(combined[localIndex].Id, entry.Id,
-                                          StringComparison.OrdinalIgnoreCase))
-                            combined.RemoveAt(localIndex);
+                        if (!installed.IsImported) continue;
+                        var latest = installed.LatestContent();
+                        if (latest != null && latest.ContentVersion >= entry.Revision) continue;
+                        for (var localIndex = combined.Count - 1; localIndex >= 0; localIndex--)
+                        {
+                            if (string.Equals(combined[localIndex].Id, entry.Id,
+                                              StringComparison.OrdinalIgnoreCase))
+                                combined.RemoveAt(localIndex);
+                        }
                     }
-                }
 
-                combined.Add(entry.ToRecord(CommunityCatalogClient.ContentKey(entry),
-                                            CommunityCatalogClient.ThumbnailKey(entry)));
+                    combined.Add(entry.ToRecord(CommunityCatalogClient.ContentKey(entry),
+                                                CommunityCatalogClient.ThumbnailKey(entry)));
+                }
             }
 
             combined.Sort((a, b) => b.UpdatedAtMs.CompareTo(a.UpdatedAtMs));
@@ -508,6 +553,16 @@ namespace SS2Revive
 
         internal static void Played(UGCService2 service, string serverLevelId, Action succeeded, Action failed)
         {
+            if (LegacyLevelCatalog.IsLegacy(serverLevelId))
+            {
+                Defer(() =>
+                {
+                    if (succeeded != null) succeeded();
+                    Raise(service, "OnUGCLevelPlayed", serverLevelId);
+                });
+                return;
+            }
+
             var level = _store == null ? null : _store.Get(serverLevelId);
             if (level == null) { Defer(failed); return; }
 
@@ -523,6 +578,8 @@ namespace SS2Revive
 
         internal static void Rate(string serverLevelId, UGCApi.ERating rating, Action succeeded, Action failed)
         {
+            if (LegacyLevelCatalog.IsLegacy(serverLevelId)) { Defer(succeeded); return; }
+
             var level = _store == null ? null : _store.Get(serverLevelId);
             if (level == null) { Defer(failed); return; }
 
@@ -576,15 +633,22 @@ namespace SS2Revive
                 }
             }
 
+            LegacyLevelCatalog.AddTags(tags);
+
             service.Tags = tags;
             Defer(succeeded);
         }
 
         // ------------------------------------------------------------- blob reads
 
-        internal static bool OwnsKey(string key) => UgcStore.OwnsKey(key);
+        internal static bool OwnsKey(string key) =>
+            LegacyLevelCatalog.OwnsKey(key) || UgcStore.OwnsKey(key);
 
-        internal static byte[] ReadKey(string key) => _store == null ? null : _store.ReadKey(key);
+        internal static byte[] ReadKey(string key)
+        {
+            if (LegacyLevelCatalog.OwnsKey(key)) return LegacyLevelCatalog.ReadKey(key);
+            return _store == null ? null : _store.ReadKey(key);
+        }
 
         internal static bool IsImported(string serverLevelId)
         {
@@ -592,11 +656,15 @@ namespace SS2Revive
             return level != null && level.IsImported;
         }
 
+        internal static bool IsLegacy(string serverLevelId) =>
+            LegacyLevelCatalog.IsLegacy(serverLevelId);
+
         // ------------------------------------------------------------ conversions
 
         private static UgcLevelRecord Find(string serverLevelId, UGCApi.EStatus status)
         {
-            var level = _store == null ? null : _store.Get(serverLevelId);
+            var level = LegacyLevelCatalog.Get(serverLevelId)
+                        ?? (_store == null ? null : _store.Get(serverLevelId));
             if (level == null) return null;
 
             // The caller asks for a level in a particular state. Answering with a level in a
@@ -632,6 +700,7 @@ namespace SS2Revive
             };
 
             summary.levelValidationFlags = LevelRulesHelper.ConvertValidationStepsToFlag(summary.levelValidationSteps);
+            LegacyLevelCatalog.Decorate(summary);
             return summary;
         }
 
@@ -665,7 +734,7 @@ namespace SS2Revive
             };
         }
 
-        private static Json ToStoredConfigurations(List<LevelConfiguration> configurations)
+        internal static Json ToStoredConfigurations(List<LevelConfiguration> configurations)
         {
             var array = Json.Array();
             if (configurations == null) return array;
@@ -769,7 +838,7 @@ namespace SS2Revive
             return configurations;
         }
 
-        private static Json ToStoredValidations(List<LevelValidationStep> steps)
+        internal static Json ToStoredValidations(List<LevelValidationStep> steps)
         {
             var array = Json.Array();
             if (steps == null) return array;

@@ -5,6 +5,18 @@ import { HttpError } from "./http";
 const FIXTURE_ID = "1a658233-92c5-4b63-87fc-4740c855730b";
 const FIXTURE_CREATED_AT = Date.UTC(2026, 0, 1, 0, 0, 0);
 const encoder = new TextEncoder();
+const FIXTURE_CONFIGURATIONS = [{
+  id: "5f3ff27f-126f-43b3-999f-e55cd44f4a27",
+  numberPlayers: 1,
+  numberTeams: 1,
+  teamMode: "COOP",
+  levelTeamConfigurations: [{ objectives: [""], playersInTeam: [] }],
+}];
+const FIXTURE_VALIDATIONS = [{
+  id: "f9dab629-2372-4eb3-b24a-063f382f6043",
+  description: "Local deterministic fixture",
+  validated: false,
+}];
 
 function writeUint16(output: number[], value: number): void {
   output.push(value & 0xff, (value >>> 8) & 0xff);
@@ -32,6 +44,32 @@ function writeBits(bytes: Uint8Array, start: number, value: number, count: numbe
   return start + count;
 }
 
+function writeGameString(bytes: Uint8Array, start: number, value: string): number {
+  let bit = Math.ceil(start / 8) * 8;
+  bit = writeBits(bytes, bit, value.length, 8);
+  for (let index = 0; index < value.length; index += 1) {
+    bit = writeBits(bytes, bit, value.charCodeAt(index), 16);
+  }
+  return bit;
+}
+
+function fixtureLevelContent(): Uint8Array {
+  const bytes = new Uint8Array(256);
+  bytes.set(encoder.encode("Surgeons"), 0);
+  bytes[8] = 29;
+  let bit = 80;
+  bit = writeGameString(bytes, bit, FIXTURE_ID);
+  bit = writeBits(bytes, bit, 0, 1); // uncompressed format-29 body
+  bit = Math.ceil(bit / 8) * 8;
+  bit = writeGameString(bytes, bit, "Fixture");
+  for (const dimension of [1, 1, 1]) bit = writeBits(bytes, bit, dimension + 0x80000000, 32);
+  bit = writeBits(bytes, bit, 0, 1); // one empty voxel
+  bit = writeBits(bytes, bit, 0x80000000, 32); // textured voxel value 0
+  bit = writeBits(bytes, bit, 0x80000000, 32); // zero prop definitions
+  bit = writeBits(bytes, bit, 0x80000000, 32); // zero prop instances
+  return bytes.slice(0, Math.ceil(bit / 8));
+}
+
 function fixtureThumbnail(): Uint8Array {
   const bytes = new Uint8Array(17);
   let bit = 0;
@@ -43,7 +81,12 @@ function fixtureThumbnail(): Uint8Array {
   return bytes;
 }
 
-export async function buildLocalFixture(): Promise<{
+export async function buildLocalFixture(options: {
+  configurations?: unknown[];
+  validations?: unknown[];
+  contentVersion?: number;
+  exportedAtMs?: number;
+} = {}): Promise<{
   bytes: Uint8Array;
   thumbnail: Uint8Array;
   bundleKey: string;
@@ -51,11 +94,7 @@ export async function buildLocalFixture(): Promise<{
   sha256: string;
   thumbnailSha256: string;
 }> {
-  const content = new Uint8Array(18);
-  content.set(encoder.encode("Surgeons"), 0);
-  content[8] = 29;
-  content[9] = 0;
-  content.set(encoder.encode("phase0!!"), 10);
+  const content = fixtureLevelContent();
   const thumbnail = fixtureThumbnail();
   const contentSha256 = await sha256Hex(content);
   const manifest = encoder.encode(JSON.stringify({
@@ -64,15 +103,15 @@ export async function buildLocalFixture(): Promise<{
     title: "Phase 0 Local Test Room",
     description: "A deterministic local-only backend fixture.",
     createdAt: FIXTURE_CREATED_AT,
-    exportedAt: FIXTURE_CREATED_AT + 1000,
+    exportedAt: options.exportedAtMs ?? FIXTURE_CREATED_AT + 1000,
     clientVersion: 29,
-    contentVersion: 1,
+    contentVersion: options.contentVersion ?? 1,
     reviveVersion: "0.1.0",
     contentSha256,
-    creators: ["STEAM-76561198145479980"],
+    creators: ["STEAM-76561198145479980-------------"],
     tags: ["TEAM_COOP", "LOCAL_TEST"],
-    configurations: [{ numberPlayers: 1, numberTeams: 1, levelTeamConfigurations: [] }],
-    validations: [{ description: "Local deterministic fixture" }],
+    configurations: options.configurations ?? FIXTURE_CONFIGURATIONS,
+    validations: options.validations ?? FIXTURE_VALIDATIONS,
   }));
   const output = [...encoder.encode("SS2REVIVE LEVEL\n")];
   writeUint16(output, 2);
@@ -88,8 +127,8 @@ export async function buildLocalFixture(): Promise<{
     thumbnail,
     sha256: inspected.bundleSha256,
     thumbnailSha256,
-    bundleKey: `approved/maps/${FIXTURE_ID}/r1/${inspected.bundleSha256}.ss2level`,
-    thumbnailKey: `approved/thumbnails/${FIXTURE_ID}/r1/${thumbnailSha256}.bin`,
+    bundleKey: `approved/maps/${FIXTURE_ID}/r${inspected.manifest.contentVersion}/${inspected.bundleSha256}.ss2level`,
+    thumbnailKey: `approved/thumbnails/${FIXTURE_ID}/r${inspected.manifest.contentVersion}/${thumbnailSha256}.bin`,
   };
 }
 
@@ -135,10 +174,10 @@ export async function seedLocalFixture(env: Env, config: RuntimeConfig): Promise
     ).bind(
       FIXTURE_ID,
       "M4JlGsWSY0uH_EdAyFVzCw",
-      JSON.stringify(["STEAM-76561198145479980"]),
+      JSON.stringify(["STEAM-76561198145479980-------------"]),
       JSON.stringify(["TEAM_COOP", "LOCAL_TEST"]),
-      JSON.stringify([{ numberPlayers: 1, numberTeams: 1, levelTeamConfigurations: [] }]),
-      JSON.stringify([{ description: "Local deterministic fixture" }]),
+      JSON.stringify(FIXTURE_CONFIGURATIONS),
+      JSON.stringify(FIXTURE_VALIDATIONS),
       ",1,",
       "0.1.0",
       "0.1.0",

@@ -135,12 +135,15 @@ namespace SS2Revive
                 + "imported the file, the code finds the level on their machine too. Imported "
                 + "levels arrive published and credited to whoever built them, so they can be "
                 + "played and browsed but not edited.");
-            CommunityCatalogUrl = Config.Bind("CreationMode", "CommunityCatalogUrl", "",
-                "Optional HTTPS URL of a curated SS2Revive community-map catalog.json. When set, "
-                + "published maps from that bounded static catalogue are merged into Discover. "
-                + "Bundles and thumbnails must be relative objects beside the catalogue; they "
-                + "are checksum-verified, cached, and installed locally only when opened. Leave "
-                + "empty for a completely local library.");
+            // This intentionally uses a new key. Older builds wrote an empty CommunityCatalogUrl
+            // into existing config files; reusing it would silently keep the new public service
+            // disabled for every upgrading player.
+            CommunityCatalogUrl = Config.Bind("CommunityMaps", "ApiCatalogUrl",
+                "https://community.m12labs.net/v1/catalog",
+                "HTTPS URL of the public SS2Revive community-map catalogue. Published maps are "
+                + "merged into Discover without requiring a login. Bundles and thumbnails are "
+                + "checksum-verified, cached, and installed locally only when opened. Leave this "
+                + "empty only when a completely local library is desired.");
             FreeForAll = Config.Bind("FreeForAll", "Enabled", true,
                 "Draw the Free-for-all queue from the levels on this machine. Bossa served that "
                 + "queue from a curated slice of what the community had published, so without this "

@@ -19,7 +19,8 @@
     "MOCK_STEAM_ID64": "",
     "PUBLIC_ORIGIN": "https://community.m12labs.net",
     "DOWNLOAD_DAILY_BYTES": "2147483648",
-    "DOWNLOAD_CONCURRENCY": "3"
+    "DOWNLOAD_CONCURRENCY": "3",
+    "PUBLISHER_STEAM_IDS": "76561198145479980"
   },
   "secrets": {
     "required": ["AUTH_SIGNING_SECRET"]
@@ -43,6 +44,15 @@
       {
         "binding": "VALIDATION_QUEUE",
         "queue": "ss2revive-validation-production"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "ss2revive-validation-production",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "ss2revive-validation-production-dlq"
       }
     ]
   },

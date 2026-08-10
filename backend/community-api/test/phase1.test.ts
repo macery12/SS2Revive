@@ -31,6 +31,7 @@ async function json<T>(response: Response): Promise<T> {
 
 async function clearDatabase(): Promise<void> {
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM map_uploads"),
     env.DB.prepare("DELETE FROM download_leases"),
     env.DB.prepare("DELETE FROM download_usage_daily"),
     env.DB.prepare("DELETE FROM steam_openid_sessions"),
@@ -129,7 +130,10 @@ describe("Phase 1 production authentication", () => {
       }), env, config, crypto.randomUUID(), nowMs + 1,
     );
     expect(token.status).toBe(200);
-    expect((await json<{ tokenType: string }>(token)).tokenType).toBe("Bearer");
+    expect((await json<{ tokenType: string; scope: string }>(token))).toMatchObject({
+      tokenType: "Bearer",
+      scope: "maps:read maps:download maps:upload",
+    });
     await expect(confirmSteamLogin(
       new Request(`${PUBLIC_ORIGIN}/v1/auth/steam/confirm`, {
         method: "POST",
