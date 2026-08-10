@@ -16,11 +16,14 @@ const ORIGIN = "http://127.0.0.1:8787";
 const principal: AuthPrincipal = {
   steamId64: STEAM_ID,
   sessionId: "11111111-1111-1111-1111-111111111111",
-  scopes: ["maps:read", "maps:download", "maps:upload"],
+  scopes: ["maps:read", "maps:download", "maps:upload", "maps:manage", "maps:report", "maps:moderate"],
 };
 
 async function clearState(): Promise<void> {
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM moderation_events"),
+    env.DB.prepare("DELETE FROM map_reports"),
+    env.DB.prepare("DELETE FROM upload_usage_daily"),
     env.DB.prepare("DELETE FROM map_uploads"),
     env.DB.prepare("DELETE FROM map_tags"),
     env.DB.prepare("DELETE FROM map_versions"),
@@ -211,12 +214,86 @@ describe("authenticated map uploads", () => {
     expect(await env.MAP_BUCKET.head(second.bundleKey)).not.toBeNull();
   });
 
-  it("issues upload scope only to configured publisher Steam identities", async () => {
+  it("does not let an owner bypass a maintainer takedown by uploading again", async () => {
+    const nowMs = Date.UTC(2026, 7, 8, 12, 0, 0);
+    const first = await buildLocalFixture();
+    const firstId = await reserve(first.bytes, first.sha256, nowMs);
+    expect((await put(firstId, first.bytes, first.sha256, nowMs + 1)).status).toBe(202);
+    await validateUploadMessage(env, { kind: "map-upload", uploadId: firstId }, nowMs + 2);
+    await env.DB.prepare(
+      `UPDATE maps SET status = 'archived', moderation_reason = 'Maintainer review'
+        WHERE id = ?`,
+    ).bind("1a658233-92c5-4b63-87fc-4740c855730b").run();
+
+    const second = await buildLocalFixture({
+      contentVersion: 2,
+      exportedAtMs: Date.UTC(2026, 0, 1, 0, 0, 4),
+    });
+    const secondId = await reserve(second.bytes, second.sha256, nowMs + 3);
+    expect((await put(secondId, second.bytes, second.sha256, nowMs + 4)).status).toBe(202);
+    await validateUploadMessage(env, { kind: "map-upload", uploadId: secondId }, nowMs + 5);
+
+    expect(await env.DB.prepare(
+      "SELECT status, error_code FROM map_uploads WHERE id = ?",
+    ).bind(secondId).first()).toMatchObject({
+      status: "rejected",
+      error_code: "map_under_moderation",
+    });
+    expect(await env.DB.prepare(
+      "SELECT status, current_revision, moderation_reason FROM maps WHERE id = ?",
+    ).bind("1a658233-92c5-4b63-87fc-4740c855730b").first()).toMatchObject({
+      status: "archived",
+      current_revision: 1,
+      moderation_reason: "Maintainer review",
+    });
+  });
+
+  it("issues publishing scope to every Steam identity and moderation only to maintainers", async () => {
     const nowMs = Date.UTC(2026, 7, 8, 12, 0, 0);
     const config = runtimeConfig(env);
     expect((await issueAccessToken(config, STEAM_ID, crypto.randomUUID(), nowMs)).scope)
       .toContain("maps:upload");
     expect((await issueAccessToken(config, "76561198145479981", crypto.randomUUID(), nowMs)).scope)
-      .not.toContain("maps:upload");
+      .toContain("maps:upload");
+    expect((await issueAccessToken(config, STEAM_ID, crypto.randomUUID(), nowMs)).scope)
+      .toContain("maps:moderate");
+    expect((await issueAccessToken(config, "76561198145479981", crypto.randomUUID(), nowMs)).scope)
+      .not.toContain("maps:moderate");
+  });
+
+  it("enforces the atomic UTC-day reservation quota", async () => {
+    const nowMs = Date.UTC(2026, 7, 8, 12, 0, 0);
+    const fixture = await buildLocalFixture();
+    const config = { ...runtimeConfig(env), uploadDailyLimit: 1 };
+    const request = () => new Request(`${ORIGIN}/v1/uploads`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sizeBytes: fixture.bytes.length, sha256: fixture.sha256 }),
+    });
+    expect((await reserveUpload(request(), env, config, principal, crypto.randomUUID(), nowMs)).status).toBe(201);
+    await expect(reserveUpload(request(), env, config, principal, crypto.randomUUID(), nowMs + 1))
+      .rejects.toMatchObject({ code: "daily_upload_limit_reached", status: 429 });
+  });
+
+  it("rejects a new map after the lifetime per-account map quota is reached", async () => {
+    const nowMs = Date.UTC(2026, 7, 8, 12, 0, 0);
+    const statements: D1PreparedStatement[] = [];
+    for (let index = 0; index < 25; index += 1) {
+      const id = crypto.randomUUID();
+      statements.push(env.DB.prepare(
+        `INSERT INTO maps
+           (id, status, current_revision, title, title_sort, description,
+            created_at_ms, updated_at_ms, owner_steam_id64)
+         VALUES (?, 'archived', 1, ?, ?, '', ?, ?, ?)`,
+      ).bind(id, `Archived ${index}`, `archived ${index}`, nowMs, nowMs, STEAM_ID));
+    }
+    await env.DB.batch(statements);
+    const fixture = await buildLocalFixture();
+    const uploadId = await reserve(fixture.bytes, fixture.sha256, nowMs + 1);
+    expect((await put(uploadId, fixture.bytes, fixture.sha256, nowMs + 2)).status).toBe(202);
+    await validateUploadMessage(env, { kind: "map-upload", uploadId }, nowMs + 3);
+    expect(await env.DB.prepare(
+      "SELECT status, error_code FROM map_uploads WHERE id = ?",
+    ).bind(uploadId).first()).toMatchObject({ status: "rejected", error_code: "map_quota_reached" });
   });
 });

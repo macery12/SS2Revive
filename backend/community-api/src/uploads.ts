@@ -12,7 +12,7 @@ import {
   type InspectedLevelBundle,
   type UploadStatus,
 } from "@ss2revive/community-contracts";
-import type { RuntimeConfig } from "./config";
+import { runtimeConfig, type RuntimeConfig } from "./config";
 import { emptyResponse, HttpError, jsonResponse, readJsonObject, requireMethod } from "./http";
 
 const RESERVATION_LIFETIME_MS = 30 * 60 * 1000;
@@ -45,6 +45,9 @@ interface ExistingMapRow {
   creator_ids_json: string;
   sha256: string;
   bundle_key: string;
+  owner_steam_id64: string | null;
+  status: "published" | "unpublished" | "archived";
+  moderation_reason: string | null;
 }
 
 class UploadRejected extends Error {
@@ -61,9 +64,33 @@ function gamePlayerId(steamId64: string): string {
   return `STEAM-${steamId64}`.padEnd(36, "-");
 }
 
-function requirePublisher(config: RuntimeConfig, principal: AuthPrincipal): void {
-  if (!config.publisherSteamIds.has(principal.steamId64) || !principal.scopes.includes("maps:upload")) {
-    throw new HttpError(403, "publisher_required", "This Steam account is not allowed to publish maps.");
+function requirePublisher(principal: AuthPrincipal): void {
+  if (!principal.scopes.includes("maps:upload")) {
+    throw new HttpError(403, "scope_denied", "The token lacks the required publishing scope.");
+  }
+}
+
+async function reserveDailyQuota(
+  env: Env,
+  config: RuntimeConfig,
+  steamId64: string,
+  nowMs: number,
+): Promise<void> {
+  const dayUtc = new Date(nowMs).toISOString().slice(0, 10);
+  const row = await env.DB.prepare(
+    `INSERT INTO upload_usage_daily (steam_id64, day_utc, reservations, updated_at)
+     VALUES (?, ?, 1, ?)
+     ON CONFLICT(steam_id64, day_utc) DO UPDATE SET
+       reservations = upload_usage_daily.reservations + 1,
+       updated_at = excluded.updated_at
+     WHERE upload_usage_daily.reservations < ?
+     RETURNING reservations`,
+  ).bind(steamId64, dayUtc, nowMs, config.uploadDailyLimit).first<{ reservations: number }>();
+  if (row === null) {
+    const nextDayMs = Date.parse(`${dayUtc}T00:00:00.000Z`) + 24 * 60 * 60 * 1000;
+    throw new HttpError(429, "daily_upload_limit_reached", "The daily upload limit has been reached.", {
+      "Retry-After": String(Math.max(60, Math.ceil((nextDayMs - nowMs) / 1000))),
+    });
   }
 }
 
@@ -102,7 +129,7 @@ export async function reserveUpload(
   nowMs: number,
 ): Promise<Response> {
   requireMethod(request, "POST");
-  requirePublisher(config, principal);
+  requirePublisher(principal);
   const body = await readJsonObject(request, 4096);
   if (
     !hasOnlyKeys(body, ["sizeBytes", "sha256"]) ||
@@ -123,6 +150,7 @@ export async function reserveUpload(
       "Retry-After": "60",
     });
   }
+  await reserveDailyQuota(env, config, principal.steamId64, nowMs);
 
   const uploadId = crypto.randomUUID();
   const expiresAt = nowMs + RESERVATION_LIFETIME_MS;
@@ -159,14 +187,14 @@ async function enqueueValidation(env: Env, uploadId: string): Promise<void> {
 export async function putUploadBundle(
   request: Request,
   env: Env,
-  config: RuntimeConfig,
+  _config: RuntimeConfig,
   principal: AuthPrincipal,
   uploadId: string,
   requestId: string,
   nowMs: number,
 ): Promise<Response> {
   requireMethod(request, "PUT");
-  requirePublisher(config, principal);
+  requirePublisher(principal);
   if (!isCanonicalUuid(uploadId)) throw new HttpError(404, "upload_not_found", "The upload was not found.");
   const row = await uploadRow(env, uploadId, principal.steamId64);
   if (row === null) throw new HttpError(404, "upload_not_found", "The upload was not found.");
@@ -239,13 +267,13 @@ export async function putUploadBundle(
 export async function getUploadStatus(
   request: Request,
   env: Env,
-  config: RuntimeConfig,
+  _config: RuntimeConfig,
   principal: AuthPrincipal,
   uploadId: string,
   requestId: string,
 ): Promise<Response> {
   requireMethod(request, "GET");
-  requirePublisher(config, principal);
+  requirePublisher(principal);
   if (!isCanonicalUuid(uploadId)) throw new HttpError(404, "upload_not_found", "The upload was not found.");
   const row = await uploadRow(env, uploadId, principal.steamId64);
   if (row === null) throw new HttpError(404, "upload_not_found", "The upload was not found.");
@@ -258,14 +286,14 @@ export async function getUploadStatus(
 export async function cancelUpload(
   request: Request,
   env: Env,
-  config: RuntimeConfig,
+  _config: RuntimeConfig,
   principal: AuthPrincipal,
   uploadId: string,
   requestId: string,
   nowMs: number,
 ): Promise<Response> {
   requireMethod(request, "DELETE");
-  requirePublisher(config, principal);
+  requirePublisher(principal);
   if (!isCanonicalUuid(uploadId)) throw new HttpError(404, "upload_not_found", "The upload was not found.");
   const row = await uploadRow(env, uploadId, principal.steamId64);
   if (row === null) throw new HttpError(404, "upload_not_found", "The upload was not found.");
@@ -369,6 +397,7 @@ async function rejectUpload(env: Env, row: UploadRow, code: string, message: str
 
 async function publishValidatedUpload(
   env: Env,
+  config: RuntimeConfig,
   row: UploadRow,
   validationLease: string,
   nowMs: number,
@@ -399,25 +428,58 @@ async function publishValidatedUpload(
 
   const revision = inspected.manifest.contentVersion;
   const existing = await env.DB.prepare(
-    `SELECT m.current_revision, v.creator_ids_json, v.sha256, v.bundle_key
+    `SELECT m.current_revision, m.owner_steam_id64, m.status, m.moderation_reason,
+            v.creator_ids_json, v.sha256, v.bundle_key
        FROM maps m JOIN map_versions v ON v.map_id = m.id AND v.revision = m.current_revision
       WHERE m.id = ?`,
   ).bind(inspected.manifest.id).first<ExistingMapRow>();
   if (existing !== null) {
-    if (!creatorArray(existing.creator_ids_json).includes(uploaderPlayerId)) {
+    if ((existing.owner_steam_id64 !== null && existing.owner_steam_id64 !== row.steam_id64) ||
+        (existing.owner_steam_id64 === null && !creatorArray(existing.creator_ids_json).includes(uploaderPlayerId))) {
       throw new UploadRejected("map_owner_mismatch", "This Steam user does not own the existing community map.");
+    }
+    if (existing.moderation_reason !== null) {
+      throw new UploadRejected(
+        "map_under_moderation",
+        "This map was removed by a maintainer and cannot be republished until it is restored.",
+      );
     }
     if (revision <= existing.current_revision) {
       if (revision === existing.current_revision &&
           await isIdempotentRevision(env, existing, inspected, nowMs)) {
-        await env.DB.prepare(
-          `UPDATE map_uploads SET status = 'published', map_id = ?, revision = ?, completed_at = ?
-            WHERE id = ? AND status = 'validating' AND validation_lease = ?`,
-        ).bind(inspected.manifest.id, revision, nowMs, row.id, validationLease).run();
+        const results = await env.DB.batch([
+          env.DB.prepare(
+            `UPDATE maps SET status = 'published', owner_steam_id64 = COALESCE(owner_steam_id64, ?),
+                             unpublished_at_ms = NULL, archived_at_ms = NULL,
+                             moderation_reason = NULL, updated_at_ms = MAX(updated_at_ms, ?)
+              WHERE id = ? AND (owner_steam_id64 = ? OR owner_steam_id64 IS NULL)`,
+          ).bind(row.steam_id64, inspected.manifest.exportedAt, inspected.manifest.id, row.steam_id64),
+          env.DB.prepare(
+            `UPDATE map_versions SET status = 'published' WHERE map_id = ? AND revision = ?`,
+          ).bind(inspected.manifest.id, revision),
+          env.DB.prepare(
+            `UPDATE map_uploads SET status = 'published', map_id = ?, revision = ?, completed_at = ?
+              WHERE id = ? AND status = 'validating' AND validation_lease = ?`,
+          ).bind(inspected.manifest.id, revision, nowMs, row.id, validationLease),
+        ]);
+        if ((results.at(-1)?.meta.changes ?? 0) !== 1) {
+          throw new Error("idempotent publication state did not advance");
+        }
         await env.MAP_BUCKET.delete(row.quarantine_key);
         return;
       }
       throw new UploadRejected("revision_not_newer", "Save the level again before uploading a new revision.");
+    }
+  }
+  if (existing === null) {
+    const owned = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM maps WHERE owner_steam_id64 = ?`,
+    ).bind(row.steam_id64).first<{ count: number }>();
+    if (owned === null || !Number.isSafeInteger(owned.count)) {
+      throw new Error("the map ownership quota could not be checked");
+    }
+    if (owned.count >= config.mapsPerAccountLimit) {
+      throw new UploadRejected("map_quota_reached", "This Steam account has reached its map limit.");
     }
   }
 
@@ -470,13 +532,19 @@ async function publishValidatedUpload(
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
       `INSERT INTO maps
-         (id, status, current_revision, title, title_sort, description, created_at_ms, updated_at_ms)
-       VALUES (?, 'published', ?, ?, ?, ?, ?, ?)
+         (id, status, current_revision, title, title_sort, description, created_at_ms, updated_at_ms,
+          owner_steam_id64, unpublished_at_ms, archived_at_ms, moderation_reason)
+       SELECT ?, 'published', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL
+        WHERE EXISTS (SELECT 1 FROM maps WHERE id = ?)
+           OR (SELECT COUNT(*) FROM maps WHERE owner_steam_id64 = ?) < ?
        ON CONFLICT(id) DO UPDATE SET
          status = 'published', current_revision = excluded.current_revision,
          title = excluded.title, title_sort = excluded.title_sort,
          description = excluded.description, updated_at_ms = excluded.updated_at_ms
-       WHERE maps.current_revision < excluded.current_revision`,
+         , owner_steam_id64 = COALESCE(maps.owner_steam_id64, excluded.owner_steam_id64)
+         , unpublished_at_ms = NULL, archived_at_ms = NULL, moderation_reason = NULL
+       WHERE maps.current_revision < excluded.current_revision
+         AND (maps.owner_steam_id64 = excluded.owner_steam_id64 OR maps.owner_steam_id64 IS NULL)`,
     ).bind(
       manifest.id,
       revision,
@@ -485,6 +553,10 @@ async function publishValidatedUpload(
       manifest.description,
       manifest.createdAt,
       manifest.exportedAt,
+      row.steam_id64,
+      manifest.id,
+      row.steam_id64,
+      config.mapsPerAccountLimit,
     ),
     env.DB.prepare(
       `INSERT INTO map_versions
@@ -540,6 +612,16 @@ async function publishValidatedUpload(
   } catch (error) {
     // Approved keys are immutable and content-addressed. Leaving an unreferenced object for
     // later garbage collection is safer than deleting an object another idempotent attempt won.
+    if (existing === null) {
+      const [map, owned] = await Promise.all([
+        env.DB.prepare(`SELECT id FROM maps WHERE id = ?`).bind(manifest.id).first<{ id: string }>(),
+        env.DB.prepare(`SELECT COUNT(*) AS count FROM maps WHERE owner_steam_id64 = ?`)
+          .bind(row.steam_id64).first<{ count: number }>(),
+      ]);
+      if (map === null && owned !== null && owned.count >= config.mapsPerAccountLimit) {
+        throw new UploadRejected("map_quota_reached", "This Steam account has reached its map limit.");
+      }
+    }
     throw error;
   }
   await env.MAP_BUCKET.delete(row.quarantine_key);
@@ -569,7 +651,7 @@ export async function validateUploadMessage(env: Env, value: unknown, nowMs = Da
   if ((claimed.meta.changes ?? 0) !== 1) return;
   row.status = "validating";
   try {
-    await publishValidatedUpload(env, row, validationLease, nowMs);
+    await publishValidatedUpload(env, runtimeConfig(env), row, validationLease, nowMs);
   } catch (error) {
     if (error instanceof BundleValidationError) {
       await rejectUpload(env, row, error.code, error.message, nowMs);

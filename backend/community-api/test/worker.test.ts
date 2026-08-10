@@ -42,6 +42,9 @@ async function seed(): Promise<void> {
 
 beforeEach(async () => {
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM moderation_events"),
+    env.DB.prepare("DELETE FROM map_reports"),
+    env.DB.prepare("DELETE FROM upload_usage_daily"),
     env.DB.prepare("DELETE FROM map_uploads"),
     env.DB.prepare("DELETE FROM download_leases"),
     env.DB.prepare("DELETE FROM download_usage_daily"),
@@ -50,10 +53,10 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM refresh_token_families"),
     env.DB.prepare("DELETE FROM auth_sessions"),
     env.DB.prepare("DELETE FROM device_auth_sessions"),
-    env.DB.prepare("DELETE FROM users"),
     env.DB.prepare("DELETE FROM map_tags"),
     env.DB.prepare("DELETE FROM map_versions"),
     env.DB.prepare("DELETE FROM maps"),
+    env.DB.prepare("DELETE FROM users"),
   ]);
 });
 
@@ -66,6 +69,25 @@ describe("Phase 0 Worker", () => {
     });
     expect(response.status).toBe(401);
     expect(await json(response)).toMatchObject({ error: { code: "auth_required" } });
+  });
+
+  it("routes authenticated owner unpublish and archive actions and removes the map publicly", async () => {
+    const tokens = await accessToken();
+    await seed();
+    const mapId = "1a658233-92c5-4b63-87fc-4740c855730b";
+    const unpublished = await fetchApi(`/v1/maps/${mapId}/unpublish`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tokens.accessToken}`, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(unpublished.status).toBe(200);
+    const catalog = await fetchApi("/v1/catalog");
+    expect((await json<{ maps: unknown[] }>(catalog)).maps).toEqual([]);
+    const archived = await fetchApi(`/v1/maps/${mapId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${tokens.accessToken}` },
+    });
+    expect(archived.status).toBe(204);
   });
 
   it("returns only shallow health and security headers", async () => {

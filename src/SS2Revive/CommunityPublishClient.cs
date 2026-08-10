@@ -17,6 +17,14 @@ namespace SS2Revive
         internal Action<string> Failed;
     }
 
+    internal sealed class CommunityAccountCallbacks
+    {
+        internal Action<string> Status;
+        internal Action<string, Uri> AuthenticationRequired;
+        internal Action Completed;
+        internal Action<string> Failed;
+    }
+
     internal sealed class CommunityPublishOperation
     {
         private readonly ManualResetEvent _cancelled = new ManualResetEvent(false);
@@ -126,7 +134,8 @@ namespace SS2Revive
                     Post(callbacks.Status, "Checking the protected Steam publishing session...");
                     if (expectedSteamId64 == "0")
                         throw new InvalidOperationException("Steam must be online before publishing.");
-                    var accessToken = EnsureAccessToken(operation, callbacks, expectedSteamId64);
+                    var accessToken = EnsureAccessToken(operation, callbacks.AuthenticationRequired,
+                                                        expectedSteamId64);
                     operation.CancelIfRequested();
 
                     Post(callbacks.Status, "Reserving private upload space...");
@@ -169,8 +178,80 @@ namespace SS2Revive
             return operation;
         }
 
+        internal static CommunityPublishOperation Unpublish(string mapId,
+                                                             CommunityAccountCallbacks callbacks)
+        {
+            return MapAction("POST", mapId, "unpublish", "{}", 200, true,
+                             "Removing this map from the community catalogue...", callbacks);
+        }
+
+        internal static CommunityPublishOperation Archive(string mapId,
+                                                           CommunityAccountCallbacks callbacks)
+        {
+            return MapAction("DELETE", mapId, string.Empty, null, 204, true,
+                             "Archiving this community map...", callbacks);
+        }
+
+        internal static CommunityPublishOperation Report(string mapId, string reason,
+                                                          CommunityAccountCallbacks callbacks)
+        {
+            var allowed = reason == "BROKEN" || reason == "NSFW_CONTENT" || reason == "COPY"
+                          || reason == "LEVEL_DESIGN_COPYRIGHT" || reason == "FARMING";
+            if (!allowed)
+            {
+                Dispatcher.NextFrame(() => callbacks?.Failed?.Invoke("The report reason is invalid."));
+                return new CommunityPublishOperation();
+            }
+            return MapAction("POST", mapId, "reports",
+                Json.Object().Add("reason", reason).ToString(), 201, false,
+                "Sending the authenticated map report...", callbacks);
+        }
+
+        private static CommunityPublishOperation MapAction(
+            string method, string mapId, string suffix, string json, int expectedStatus,
+            bool removeFromCatalogue, string statusText, CommunityAccountCallbacks callbacks)
+        {
+            var operation = new CommunityPublishOperation();
+            var expectedSteamId64 = SteamIdentity.GetSteamId64().ToString();
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    if (!Enabled) throw new InvalidOperationException("The community API is disabled.");
+                    if (!IsGuid(mapId)) throw new InvalidDataException("The community map id is invalid.");
+                    if (expectedSteamId64 == "0")
+                        throw new InvalidOperationException("Steam must be online for this action.");
+                    Post(callbacks?.Status, statusText);
+                    var accessToken = EnsureAccessToken(operation, callbacks?.AuthenticationRequired,
+                                                        expectedSteamId64);
+                    operation.CancelIfRequested();
+                    var path = "maps/" + mapId + (string.IsNullOrEmpty(suffix) ? string.Empty : "/" + suffix);
+                    ApiResponse response;
+                    if (json == null)
+                        response = Send(method, new Uri(_apiBase, path), null, null, accessToken,
+                                        operation, RequestTimeoutMs, null);
+                    else
+                        response = SendJson(method, new Uri(_apiBase, path), json, accessToken,
+                                            operation, RequestTimeoutMs);
+                    RequireStatus(response, expectedStatus);
+                    if (removeFromCatalogue) CommunityCatalogClient.NoteRemoved(mapId);
+                    Post(callbacks?.Completed);
+                }
+                catch (OperationCanceledException)
+                {
+                    Post(callbacks?.Status, "Community action cancelled.");
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning("Community account action failed: " + ex.Message);
+                    Post(callbacks?.Failed, SafeMessage(ex));
+                }
+            });
+            return operation;
+        }
+
         private static string EnsureAccessToken(CommunityPublishOperation operation,
-                                                CommunityPublishCallbacks callbacks,
+                                                Action<string, Uri> authenticationRequired,
                                                 string expectedSteamId64)
         {
             lock (AuthGate)
@@ -220,7 +301,7 @@ namespace SS2Revive
                 var activationUri = new Uri(_origin, activationPath);
                 if (activationUri.Scheme != Uri.UriSchemeHttps || activationUri.Authority != _origin.Authority)
                     throw new InvalidDataException("The Steam activation URL was not on the configured server.");
-                Post(callbacks.AuthenticationRequired, userCode, activationUri);
+                Post(authenticationRequired, userCode, activationUri);
 
                 while (true)
                 {
@@ -266,7 +347,7 @@ namespace SS2Revive
             if (access.Length < 32 || access.Length > 4096 || refresh.Length != 43
                 || expires < 60 || expires > 3600 || !HasScope(scope, "maps:upload"))
             {
-                throw new InvalidDataException("This Steam account is not authorized to publish maps.");
+                throw new InvalidDataException("Steam authentication did not grant a valid publishing session.");
             }
             _accessToken = access;
             _accessExpiresUtc = DateTime.UtcNow.AddSeconds(expires);
@@ -536,6 +617,11 @@ namespace SS2Revive
         private static void Post(Action<string> callback, string value)
         {
             if (callback != null) Dispatcher.NextFrame(() => callback(value));
+        }
+
+        private static void Post(Action callback)
+        {
+            if (callback != null) Dispatcher.NextFrame(callback);
         }
 
         private static void Post(Action<float> callback, float value)

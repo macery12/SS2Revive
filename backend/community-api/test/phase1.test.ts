@@ -132,7 +132,7 @@ describe("Phase 1 production authentication", () => {
     expect(token.status).toBe(200);
     expect((await json<{ tokenType: string; scope: string }>(token))).toMatchObject({
       tokenType: "Bearer",
-      scope: "maps:read maps:download maps:upload",
+      scope: "maps:read maps:download maps:upload maps:manage maps:report maps:moderate",
     });
     await expect(confirmSteamLogin(
       new Request(`${PUBLIC_ORIGIN}/v1/auth/steam/confirm`, {

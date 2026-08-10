@@ -30,6 +30,8 @@ namespace SS2Revive
     /// </summary>
     internal static class UgcBackend
     {
+        private static readonly HashSet<string> CommunityPublishedIds =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static UgcStore _store;
 
         internal static bool Available => _store != null;
@@ -282,8 +284,28 @@ namespace SS2Revive
         internal static void ReconcileCommunityPublications(List<CommunityCatalogEntry> entries)
         {
             if (entries == null) return;
+            var next = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (var i = 0; i < entries.Count; i++)
+            {
+                next.Add(entries[i].Id);
                 ConfirmCommunityPublished(entries[i].Id, entries[i].Revision);
+            }
+            foreach (var previous in CommunityPublishedIds)
+                if (!next.Contains(previous)) MarkCommunityUnpublished(previous);
+            CommunityPublishedIds.Clear();
+            foreach (var id in next) CommunityPublishedIds.Add(id);
+        }
+
+        internal static void MarkCommunityUnpublished(string serverLevelId)
+        {
+            var level = _store == null ? null : _store.Get(serverLevelId);
+            if (level == null || level.IsImported
+                || !string.Equals(level.Status, UgcStore.StatusPublished,
+                                  StringComparison.OrdinalIgnoreCase)) return;
+            level.Status = UgcStore.StatusDraft;
+            _store.Update(level);
+            Plugin.Log.LogInfo("Synchronized community removal for '" + level.Title + "' ("
+                               + level.Id + "). The editable local copy remains available.");
         }
 
         /// <summary>
@@ -295,6 +317,8 @@ namespace SS2Revive
         {
             if (query == null) query = new UgcQuery();
             var legacyOnly = LegacyLevelCatalog.ApplyBrowseFilter(query);
+            string ownedCreatorId;
+            var communityOwnedOnly = CommunityManagementPatches.ApplyBrowseFilter(out ownedCreatorId);
             var allQuery = new UgcQuery
             {
                 Status = query.Status,
@@ -312,6 +336,15 @@ namespace SS2Revive
             if (legacyOnly)
             {
                 combined = LegacyLevelCatalog.Search(allQuery);
+            }
+            else if (communityOwnedOnly)
+            {
+                allQuery.CreatorId = null;
+                combined = new List<UgcLevelRecord>();
+                var owned = CommunityCatalogClient.SearchOwned(allQuery, ownedCreatorId);
+                for (var i = 0; i < owned.Count; i++)
+                    combined.Add(owned[i].ToRecord(CommunityCatalogClient.ContentKey(owned[i]),
+                                                  CommunityCatalogClient.ThumbnailKey(owned[i])));
             }
             else
             {

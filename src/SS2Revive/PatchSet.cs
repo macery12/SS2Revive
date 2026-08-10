@@ -78,6 +78,7 @@ namespace SS2Revive
                     UgcPatches.Apply(harmony);
                     LegacyLevelPatches.Apply(harmony);
                     CommunityLevelPatches.Apply(harmony);
+                    CommunityManagementPatches.Apply(harmony);
 
                     // After the library, because export and import are both operations on it and
                     // there is nothing to share without one.

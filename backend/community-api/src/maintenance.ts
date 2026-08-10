@@ -32,6 +32,8 @@ export async function cleanupExpiredState(env: Env, nowMs: number): Promise<void
     ).bind(retentionCutoff),
     env.DB.prepare(`DELETE FROM download_usage_daily WHERE day_utc < ?`)
       .bind(new Date(nowMs - 8 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)),
+    env.DB.prepare(`DELETE FROM upload_usage_daily WHERE day_utc < ?`)
+      .bind(new Date(nowMs - 8 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)),
     env.DB.prepare(
       `DELETE FROM map_uploads
         WHERE completed_at IS NOT NULL AND completed_at <= ?

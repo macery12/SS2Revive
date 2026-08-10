@@ -11,7 +11,9 @@ export interface RuntimeConfig {
   publicOrigin: string;
   downloadDailyBytes: number;
   downloadConcurrency: number;
-  publisherSteamIds: ReadonlySet<string>;
+  uploadDailyLimit: number;
+  mapsPerAccountLimit: number;
+  maintainerSteamIds: ReadonlySet<string>;
 }
 
 function isBase64Secret(value: unknown): value is string {
@@ -73,20 +75,25 @@ export function runtimeConfig(env: Env): RuntimeConfig {
   if (downloadDailyBytes === null || downloadConcurrency === null) {
     throw new HttpError(503, "temporarily_unavailable", "The download quota configuration is invalid.");
   }
-  if (typeof env.PUBLISHER_STEAM_IDS !== "string" || env.PUBLISHER_STEAM_IDS.length > 1024) {
-    throw new HttpError(503, "temporarily_unavailable", "The publisher configuration is invalid.");
+  const uploadDailyLimit = boundedInteger(env.UPLOAD_DAILY_LIMIT, 1, 50);
+  const mapsPerAccountLimit = boundedInteger(env.MAPS_PER_ACCOUNT_LIMIT, 1, 200);
+  if (uploadDailyLimit === null || mapsPerAccountLimit === null) {
+    throw new HttpError(503, "temporarily_unavailable", "The publishing quota configuration is invalid.");
   }
-  const publisherSteamIds = new Set<string>();
-  for (const value of env.PUBLISHER_STEAM_IDS.split(",")) {
+  if (typeof env.MAINTAINER_STEAM_IDS !== "string" || env.MAINTAINER_STEAM_IDS.length > 1024) {
+    throw new HttpError(503, "temporarily_unavailable", "The maintainer configuration is invalid.");
+  }
+  const maintainerSteamIds = new Set<string>();
+  for (const value of env.MAINTAINER_STEAM_IDS.split(",")) {
     const steamId64 = value.trim();
     if (steamId64 === "") continue;
     if (!isSteamId64(steamId64)) {
-      throw new HttpError(503, "temporarily_unavailable", "The publisher configuration is invalid.");
+      throw new HttpError(503, "temporarily_unavailable", "The maintainer configuration is invalid.");
     }
-    publisherSteamIds.add(steamId64);
+    maintainerSteamIds.add(steamId64);
   }
-  if (publisherSteamIds.size === 0) {
-    throw new HttpError(503, "temporarily_unavailable", "No map publisher is configured.");
+  if (maintainerSteamIds.size === 0) {
+    throw new HttpError(503, "temporarily_unavailable", "No community maintainer is configured.");
   }
   return {
     environment: env.ENVIRONMENT,
@@ -98,6 +105,8 @@ export function runtimeConfig(env: Env): RuntimeConfig {
     publicOrigin: env.PUBLIC_ORIGIN,
     downloadDailyBytes,
     downloadConcurrency,
-    publisherSteamIds,
+    uploadDailyLimit,
+    mapsPerAccountLimit,
+    maintainerSteamIds,
   };
 }

@@ -8,6 +8,14 @@ import {
   refreshSession,
 } from "./auth";
 import { runtimeConfig } from "./config";
+import {
+  archiveOwnMap,
+  listOpenReports,
+  reportMap,
+  restoreMap,
+  takedownMap,
+  unpublishOwnMap,
+} from "./community-controls";
 import { opaqueHash } from "./crypto";
 import { downloadObject } from "./downloads";
 import { errorResponse, HttpError, jsonResponse, requireMethod } from "./http";
@@ -227,6 +235,35 @@ async function route(request: Request, env: Env, requestId: string): Promise<Res
     return listMaps(request, env, config, requestId, nowMs);
   }
 
+  if (path === "/v1/moderation/reports") {
+    const principal = await authenticate(request, env, config, "maps:moderate", nowMs);
+    await limitActor(env, config, "moderation-reports", principal.steamId64);
+    return listOpenReports(request, env, config, principal, requestId);
+  }
+
+  const moderationMatch = /^\/v1\/moderation\/maps\/([^/]+)\/(takedown|restore)$/u.exec(path);
+  if (moderationMatch !== null) {
+    const principal = await authenticate(request, env, config, "maps:moderate", nowMs);
+    await limitActor(env, config, "moderation-action", principal.steamId64);
+    return moderationMatch[2] === "takedown"
+      ? takedownMap(request, env, config, principal, moderationMatch[1] ?? "", requestId, nowMs)
+      : restoreMap(request, env, config, principal, moderationMatch[1] ?? "", requestId, nowMs);
+  }
+
+  const reportMatch = /^\/v1\/maps\/([^/]+)\/reports$/u.exec(path);
+  if (reportMatch !== null) {
+    const principal = await authenticate(request, env, config, "maps:report", nowMs);
+    await limitActor(env, config, "map-report", principal.steamId64);
+    return reportMap(request, env, principal, reportMatch[1] ?? "", requestId, nowMs);
+  }
+
+  const unpublishMatch = /^\/v1\/maps\/([^/]+)\/unpublish$/u.exec(path);
+  if (unpublishMatch !== null) {
+    const principal = await authenticate(request, env, config, "maps:manage", nowMs);
+    await limitActor(env, config, "map-unpublish", principal.steamId64);
+    return unpublishOwnMap(request, env, principal, unpublishMatch[1] ?? "", requestId, nowMs);
+  }
+
   const downloadMatch = /^\/v1\/maps\/([^/]+)\/versions\/([1-9][0-9]*)\/(download|thumbnail)$/u.exec(path);
   if (downloadMatch !== null) {
     const mapId = downloadMatch[1] ?? "";
@@ -254,6 +291,11 @@ async function route(request: Request, env: Env, requestId: string): Promise<Res
 
   const detailMatch = /^\/v1\/maps\/([^/]+)$/u.exec(path);
   if (detailMatch !== null) {
+    if (request.method === "DELETE") {
+      const principal = await authenticate(request, env, config, "maps:manage", nowMs);
+      await limitActor(env, config, "map-archive", principal.steamId64);
+      return archiveOwnMap(request, env, principal, detailMatch[1] ?? "", requestId, nowMs);
+    }
     requireMethod(request, "GET");
     await limitPublicRead(request, env, config, "maps");
     return mapDetail(env, detailMatch[1] ?? "", requestId);

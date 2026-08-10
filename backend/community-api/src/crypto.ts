@@ -74,9 +74,9 @@ export async function issueAccessToken(
 ): Promise<{ token: string; expiresAtMs: number; scope: string }> {
   const header = base64UrlEncode(encoder.encode(JSON.stringify({ alg: "HS256", typ: "JWT" })));
   const expiresAtMs = nowMs + 15 * 60 * 1000;
-  const scope = config.publisherSteamIds.has(steamId64)
-    ? "maps:read maps:download maps:upload"
-    : "maps:read maps:download";
+  const scopes = ["maps:read", "maps:download", "maps:upload", "maps:manage", "maps:report"];
+  if (config.maintainerSteamIds.has(steamId64)) scopes.push("maps:moderate");
+  const scope = scopes.join(" ");
   const claims: AccessClaims = {
     iss: config.issuer,
     aud: config.audience,

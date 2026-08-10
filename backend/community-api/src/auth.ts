@@ -272,7 +272,7 @@ export async function authenticate(
   request: Request,
   env: Env,
   config: RuntimeConfig,
-  requiredScope: "maps:read" | "maps:download" | "maps:upload",
+  requiredScope: "maps:read" | "maps:download" | "maps:upload" | "maps:manage" | "maps:report" | "maps:moderate",
   nowMs: number,
 ): Promise<AuthPrincipal> {
   const authorization = request.headers.get("Authorization");

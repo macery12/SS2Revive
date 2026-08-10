@@ -118,6 +118,41 @@ namespace SS2Revive
             }
         }
 
+        internal static void NoteRemoved(string mapId)
+        {
+            if (string.IsNullOrEmpty(mapId)) return;
+            lock (Gate)
+            {
+                ConfirmedPublished.Remove(mapId);
+                if (_catalog != null)
+                    for (var i = _catalog.Entries.Count - 1; i >= 0; i--)
+                        if (string.Equals(_catalog.Entries[i].Id, mapId,
+                                          StringComparison.OrdinalIgnoreCase))
+                            _catalog.Entries.RemoveAt(i);
+            }
+            UgcBackend.MarkCommunityUnpublished(mapId);
+            Dispatcher.NextFrame(SharingPatches.RefreshCurrentCreateScreen);
+            ForceRefresh();
+        }
+
+        internal static List<CommunityCatalogEntry> SearchOwned(UgcQuery query, string creatorId)
+        {
+            EnsureRefresh(false);
+            CommunityCatalog snapshot;
+            lock (Gate) snapshot = _catalog;
+            var result = snapshot == null
+                ? new List<CommunityCatalogEntry>()
+                : snapshot.Search(query);
+            for (var i = result.Count - 1; i >= 0; i--)
+            {
+                if (string.IsNullOrEmpty(creatorId) || result[i].CreatorIds == null
+                    || !result[i].CreatorIds.Contains(creatorId)
+                    || CommunityCatalog.CompatibilityError(result[i], Plugin.PluginVersion) != null)
+                    result.RemoveAt(i);
+            }
+            return result;
+        }
+
         internal static bool IsPublishedMap(string mapId)
         {
             if (string.IsNullOrEmpty(mapId)) return false;

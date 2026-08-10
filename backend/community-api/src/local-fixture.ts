@@ -146,13 +146,20 @@ export async function seedLocalFixture(env: Env, config: RuntimeConfig): Promise
 
   await env.DB.batch([
     env.DB.prepare(
+      `INSERT INTO users (steam_id64, status, created_at, last_login_at)
+       VALUES (?, 'active', ?, ?)
+       ON CONFLICT(steam_id64) DO UPDATE SET last_login_at = excluded.last_login_at`,
+    ).bind(config.mockSteamId64, FIXTURE_CREATED_AT, FIXTURE_CREATED_AT),
+    env.DB.prepare(
       `INSERT INTO maps
-         (id, status, current_revision, title, title_sort, description, created_at_ms, updated_at_ms)
-       VALUES (?, 'published', 1, ?, ?, ?, ?, ?)
+         (id, status, current_revision, title, title_sort, description, created_at_ms, updated_at_ms,
+          owner_steam_id64)
+       VALUES (?, 'published', 1, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          status = excluded.status, current_revision = excluded.current_revision,
          title = excluded.title, title_sort = excluded.title_sort, description = excluded.description,
-         created_at_ms = excluded.created_at_ms, updated_at_ms = excluded.updated_at_ms`,
+         created_at_ms = excluded.created_at_ms, updated_at_ms = excluded.updated_at_ms,
+         owner_steam_id64 = excluded.owner_steam_id64`,
     ).bind(
       FIXTURE_ID,
       "Phase 0 Local Test Room",
@@ -160,6 +167,7 @@ export async function seedLocalFixture(env: Env, config: RuntimeConfig): Promise
       "A deterministic local-only backend fixture.",
       FIXTURE_CREATED_AT,
       FIXTURE_CREATED_AT + 1000,
+      config.mockSteamId64,
     ),
     env.DB.prepare(`DELETE FROM map_tags WHERE map_id = ? AND revision = 1`).bind(FIXTURE_ID),
     env.DB.prepare(`DELETE FROM map_versions WHERE map_id = ? AND revision = 1`).bind(FIXTURE_ID),
