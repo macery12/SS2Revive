@@ -36,8 +36,52 @@ namespace SS2Revive
         private static CommunityCatalog _catalog;
         private static bool _refreshing;
         private static DateTime _lastRefreshUtc = DateTime.MinValue;
+        private static bool? _lastLiveRefreshSucceeded;
+        private static readonly List<Action<bool>> ConnectionWaiters = new List<Action<bool>>();
 
         internal static bool Enabled => _catalogUri != null;
+
+        /// <summary>
+        /// Reports whether the configured endpoint most recently returned a valid live catalogue.
+        /// A disk cache deliberately does not count as connected. If the startup refresh is still
+        /// running, the callback joins it rather than creating a duplicate request.
+        /// </summary>
+        internal static void CheckConnection(Action<bool> completed)
+        {
+            if (completed == null) return;
+
+            bool? immediate = null;
+            var startRefresh = false;
+            lock (Gate)
+            {
+                if (_catalogUri == null)
+                {
+                    immediate = false;
+                }
+                else if (_refreshing)
+                {
+                    ConnectionWaiters.Add(completed);
+                }
+                else if (_lastLiveRefreshSucceeded.HasValue
+                         && DateTime.UtcNow - _lastRefreshUtc < RefreshInterval)
+                {
+                    immediate = _lastLiveRefreshSucceeded.Value;
+                }
+                else
+                {
+                    ConnectionWaiters.Add(completed);
+                    startRefresh = true;
+                }
+            }
+
+            if (immediate.HasValue)
+            {
+                Dispatcher.NextFrame(() => completed(immediate.Value));
+                return;
+            }
+
+            if (startRefresh) EnsureRefresh(false);
+        }
 
         internal static void ForceRefresh()
         {
@@ -48,7 +92,12 @@ namespace SS2Revive
         internal static void Initialise(UgcStore store, string configuredUrl)
         {
             _store = store;
-            lock (Gate) ConfirmedPublished.Clear();
+            lock (Gate)
+            {
+                ConfirmedPublished.Clear();
+                _lastLiveRefreshSucceeded = null;
+                _lastRefreshUtc = DateTime.MinValue;
+            }
             Uri catalogUri;
             if (store == null || string.IsNullOrWhiteSpace(configuredUrl)) return;
             if (!Uri.TryCreate(configuredUrl.Trim(), UriKind.Absolute, out catalogUri)
@@ -347,6 +396,7 @@ namespace SS2Revive
             ThreadPool.QueueUserWorkItem(delegate
             {
                 if (loadCacheFirst) TryLoadCachedCatalog();
+                var liveSucceeded = false;
                 try
                 {
                     var bytes = Download(_catalogUri, CommunityCatalog.MaxDocumentBytes);
@@ -354,6 +404,7 @@ namespace SS2Revive
                     string warning;
                     if (!CommunityCatalog.TryParse(bytes, out parsed, out warning))
                         throw new InvalidDataException(warning ?? "The catalogue is invalid.");
+                    liveSucceeded = true;
                     lock (Gate) _catalog = parsed;
                     UgcBackend.ReconcileCommunityPublications(parsed.Entries);
                     Dispatcher.NextFrame(SharingPatches.RefreshCurrentCreateScreen);
@@ -369,13 +420,36 @@ namespace SS2Revive
                 }
                 finally
                 {
+                    List<Action<bool>> waiters;
                     lock (Gate)
                     {
                         _lastRefreshUtc = DateTime.UtcNow;
+                        _lastLiveRefreshSucceeded = liveSucceeded;
                         _refreshing = false;
+                        waiters = new List<Action<bool>>(ConnectionWaiters);
+                        ConnectionWaiters.Clear();
                     }
+
+                    if (waiters.Count > 0)
+                        Dispatcher.NextFrame(() => CompleteConnectionWaiters(waiters, liveSucceeded));
                 }
             });
+        }
+
+        private static void CompleteConnectionWaiters(List<Action<bool>> waiters, bool connected)
+        {
+            for (var i = 0; i < waiters.Count; i++)
+            {
+                try
+                {
+                    waiters[i](connected);
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning("A community connection-status callback threw: "
+                                          + ex.Message);
+                }
+            }
         }
 
         private static void TryLoadCachedCatalog()

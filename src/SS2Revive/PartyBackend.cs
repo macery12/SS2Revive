@@ -412,6 +412,7 @@ namespace SS2Revive
             _lobby = CSteamID.Nil;
             _locked = false;
             SteamTransport.Reset();
+            SteamVoiceChat.NotifyLobbyChanged();
         }
 
         private static void OnLobbyCreated(LobbyCreated_t result, bool ioFailure)
@@ -447,6 +448,7 @@ namespace SS2Revive
 
             _lobby = created;
             _locked = false;
+            SteamVoiceChat.NotifyLobbyChanged();
             PublishLobbyState();
 
             Plugin.Log.LogInfo("Lobby created: " + _lobby.m_SteamID
@@ -479,6 +481,7 @@ namespace SS2Revive
 
             _lobby = new CSteamID(result.m_ulSteamIDLobby);
             _locked = SteamMatchmaking.GetLobbyData(_lobby, "locked") == "1";
+            SteamVoiceChat.NotifyLobbyChanged();
             RegisterLobbyPeers();
             Plugin.Log.LogInfo("Entered lobby " + _lobby.m_SteamID
                                + " with " + MemberCount() + " member(s); owner is "
@@ -509,6 +512,7 @@ namespace SS2Revive
             }
 
             RegisterLobbyPeers();
+            SteamVoiceChat.NotifyLobbyMembershipChanged();
             Plugin.Log.LogInfo("Lobby membership changed; now " + MemberCount() + " member(s), owner "
                                + (IsOwner ? "us" : "someone else") + ".");
         }
@@ -562,6 +566,35 @@ namespace SS2Revive
             }
 
             return false;
+        }
+
+        /// <summary>
+        /// Returns a main-thread snapshot of the authenticated Steam lobby roster. Voice and text
+        /// use this as their complete authorization boundary; packet payloads never get to claim
+        /// an identity of their own.
+        /// </summary>
+        internal static List<ulong> GetLobbyMembers()
+        {
+            var members = new List<ulong>(MaxMembers);
+            if (!InLobby || !SteamIdentity.IsSteamReady())
+                return members;
+
+            try
+            {
+                var count = SteamMatchmaking.GetNumLobbyMembers(_lobby);
+                for (var i = 0; i < count && i < MaxMembers; i++)
+                {
+                    var id = SteamMatchmaking.GetLobbyMemberByIndex(_lobby, i).m_SteamID;
+                    if (id != 0UL)
+                        members.Add(id);
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("Reading lobby roster failed: " + ex.Message);
+            }
+
+            return members;
         }
 
         /// <summary>

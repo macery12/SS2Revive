@@ -114,6 +114,20 @@ namespace SS2Revive
                       + SteamTransport.QueuedReceives + " queued receive(s)"
                     : "NOT attached - UdpClientManager.Initialise has not run");
 
+            Line(sb, "Steam voice/chat", () => !Plugin.SteamVoiceChat.Value
+                ? "disabled"
+                : !SteamVoiceChat.Active
+                    ? "waiting for the game's voice provider"
+                    : "channel="
+                      + (string.IsNullOrEmpty(SteamVoiceChat.CurrentChannel)
+                          ? "<none>"
+                          : SteamVoiceChat.CurrentChannel)
+                      + ", capture=" + (SteamVoiceChat.Capturing ? "recording" : "stopped")
+                      + ", remoteSpeakers=" + SteamVoiceChat.RemoteSpeakerCount
+                      + ", droppedVoice=" + SteamVoiceChat.DroppedVoicePackets
+                      + ", rejectedVoice=" + SteamVoiceChat.RejectedVoicePackets
+                      + ", rejectedText=" + SteamVoiceChat.RejectedTextMessages);
+
             var shell = Shell.Instance;
             if (shell == null)
             {

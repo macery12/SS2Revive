@@ -447,6 +447,17 @@ namespace SS2ReviveData.Tests
                 "/player-progression/playerProgression/players/" + PlayerA + "/progression");
             Check("the client's own figure wins over anything recorded here",
                 mirrored["currentSeasonXp"].AsLong() == 4321 && mirrored["currentSeasonLevel"].AsInt() == 7);
+            Check("the full local progression tuple can be read without conflating its levels",
+                backend.TryGetLocalProgression(out var localSeasonLevel, out var localSeasonXp,
+                    out var localGlobalLevel)
+                && localSeasonLevel == 7 && localSeasonXp == 4321 && localGlobalLevel == 7);
+
+            backend.MirrorProgression(PlayerA, 5000, 8, 12);
+            Check("the full local progression tuple preserves a distinct global level",
+                backend.TryGetLocalProgression(out localSeasonLevel, out localSeasonXp,
+                    out localGlobalLevel)
+                && localSeasonLevel == 8 && localSeasonXp == 5000 && localGlobalLevel == 12);
+            backend.MirrorProgression(PlayerA, 4321, 7, 7);
 
             Check("a friend with no published level is refused rather than invented",
                 backend.Handle("GET",

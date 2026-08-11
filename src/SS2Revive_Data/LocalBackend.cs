@@ -234,6 +234,27 @@ namespace SS2ReviveData
             }
         }
 
+        /// <summary>The complete local progression tuple, for one-shot repair operations that
+        /// must not accidentally lower a global level which differs from the season level.</summary>
+        public bool TryGetLocalProgression(out int seasonLevel, out long seasonXp,
+                                           out int globalLevel)
+        {
+            seasonLevel = 1;
+            seasonXp = 0;
+            globalLevel = 1;
+            if (!PlayerIds.IsWellFormed(_options.LocalPlayerId)) return false;
+
+            lock (_store.Gate)
+            {
+                var record = _store.Find(_options.LocalPlayerId);
+                if (record == null) return false;
+                seasonLevel = record.SeasonLevel;
+                seasonXp = record.SeasonXp;
+                globalLevel = record.GlobalLevel;
+                return true;
+            }
+        }
+
         // ---------------------------------------------------------------- routing
 
         public LocalResponse Handle(string verb, string path, string body)

@@ -31,7 +31,20 @@ namespace SS2Revive
             if (Plugin.BypassVersionGate.Value)
                 ApplyVersionGateBypass(harmony);
 
-            if (Plugin.DisableVoip.Value)
+            if (Plugin.SteamVoiceChat.Value)
+            {
+                if (!Plugin.LocalParty.Value || !Plugin.SteamTransport.Value)
+                {
+                    Report.Add("FAIL Steam voice/chat -> Steam lobby backend and P2P transport must both be enabled");
+                    if (Plugin.DisableVoip.Value)
+                        ApplyVoipDisable(harmony);
+                }
+                else
+                {
+                    ApplySteamVoiceChat(harmony);
+                }
+            }
+            else if (Plugin.DisableVoip.Value)
                 ApplyVoipDisable(harmony);
 
             // Independent of Creation Mode and of level sharing on purpose. Levels arrive from
@@ -445,9 +458,18 @@ namespace SS2Revive
             {
                 var target = Method(typeof(PlayerProgressionService), "PersistProgressionData",
                     new[] { typeof(PlayerId), typeof(PlayerProgressionService.ProgressionData) });
-                harmony.Patch(target, null, new HarmonyMethod(
-                    AccessTools.Method(typeof(PatchSet), nameof(PersistProgressionData_Postfix))));
+                harmony.Patch(target,
+                    new HarmonyMethod(AccessTools.Method(
+                        typeof(PatchSet), nameof(PersistProgressionData_Prefix))),
+                    new HarmonyMethod(AccessTools.Method(
+                        typeof(PatchSet), nameof(PersistProgressionData_Postfix))));
             });
+        }
+
+        private static void PersistProgressionData_Prefix(
+            PlayerId playerId, ref PlayerProgressionService.ProgressionData progressionData)
+        {
+            LocalBackendHost.EnforceProgressionFloor(playerId.ToString(), ref progressionData);
         }
 
         private static void PersistProgressionData_Postfix(
@@ -482,6 +504,12 @@ namespace SS2Revive
                 harmony.Patch(target,
                     new HarmonyMethod(AccessTools.Method(typeof(PatchSet), nameof(SkipOriginal))));
             });
+        }
+
+        private static void ApplySteamVoiceChat(Harmony harmony)
+        {
+            Try("Vivox provider -> Steam voice and text chat", () =>
+                SteamVoiceChatPatches.Apply(harmony));
         }
 
         // -------------------------------------------------- dead backend stubs

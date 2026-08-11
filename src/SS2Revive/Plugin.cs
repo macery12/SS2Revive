@@ -60,6 +60,7 @@ namespace SS2Revive
         internal static ConfigEntry<bool> BypassVersionGate;
         internal static ConfigEntry<bool> BypassConnectionCheck;
         internal static ConfigEntry<bool> DisableVoip;
+        internal static ConfigEntry<bool> SteamVoiceChat;
         internal static ConfigEntry<bool> StubDeadBackends;
         internal static ConfigEntry<bool> LocalParty;
         internal static ConfigEntry<bool> HttpFailFast;
@@ -72,6 +73,7 @@ namespace SS2Revive
         internal static ConfigEntry<bool> FreeForAllIncludeGameLevels;
         internal static ConfigEntry<BackendMode> Backend;
         internal static ConfigEntry<bool> GrantAllCosmetics;
+        internal static ConfigEntry<bool> SetLevelTo50OnNextLaunch;
         internal static ConfigEntry<string> SaveDirectory;
         internal static ConfigEntry<bool> NewsFeedEnabled;
         internal static ConfigEntry<string> NewsFeedUrl;
@@ -100,6 +102,11 @@ namespace SS2Revive
                 + "internet connection' box, with nothing else in this plugin ever reached.");
             DisableVoip = Config.Bind("Bypass", "Voip", true,
                 "Stop Vivox from initialising or logging in. Its backend is gone.");
+            SteamVoiceChat = Config.Bind("VoiceChat", "SteamReplacement", true,
+                "Restore the game's voice and party text chat through Steam. The original voice "
+                + "mode, push-to-talk binding, volume sliders, speaking indicators and player mute "
+                + "buttons remain in use; only the retired Vivox provider is replaced. Steam and "
+                + "Windows choose the microphone. Leave this on.");
             StubDeadBackends = Config.Bind("Bypass", "DeadBackendCalls", true,
                 "No-op calls that can only reach servers Bossa has shut down (telemetry registration).");
             LocalParty = Config.Bind("Party", "SteamLobbyBackend", true,
@@ -168,6 +175,11 @@ namespace SS2Revive
                 + "the backend omits. Turn this off to earn cosmetics along the season track "
                 + "instead - safe in Local mode, where the recorded XP is copied from the client's "
                 + "own save and cannot drift.");
+            SetLevelTo50OnNextLaunch = Config.Bind("Progression", "SetLevelTo50OnNextLaunch", false,
+                "One-shot level restore. Set this to true, then start the game to raise the signed-in "
+                + "local account to level 50. It never lowers an account that is already level 50 "
+                + "or higher, and resets itself to false only after the restored progression has "
+                + "been saved successfully. Requires Backend.Mode = Local.");
             SaveDirectory = Config.Bind("Backend", "SaveDirectory", "",
                 "Where Local mode keeps progress. Empty means next to the game's own saves, in "
                 + "%LOCALAPPDATA%\\Bossa Studios\\Surgeon Simulator 2\\SS2Revive. Do not point "
@@ -207,6 +219,7 @@ namespace SS2Revive
 
             // Must exist before any patch can defer work onto it.
             Dispatcher.Install(gameObject);
+            UgcConnectionNotice.Install(gameObject);
 
             try
             {
@@ -288,6 +301,7 @@ namespace SS2Revive
             // captured MethodInfo, and letting it keep doing that while patches are being pulled
             // out is the one ordering here that could bite.
             // Qualified, because this class has a config field of the same name.
+            SS2Revive.SteamVoiceChat.Shutdown();
             SS2Revive.SteamTransport.Shutdown();
             _harmony?.UnpatchSelf();
         }

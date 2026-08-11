@@ -12,6 +12,7 @@ It replaces retired service calls locally, carries multiplayer over Steam, and r
 
 - Restores sign-in and bypasses retired version, maintenance, and connection checks.
 - Restores parties, Steam **Invite to Game**, **Join Game**, and peer-to-peer multiplayer.
+- Restores voice chat and party text chat through Steam while retaining the in-game controls.
 - Saves campaign grades, daily challenges, progression, and cosmetics locally.
 - Restores Creation Mode for building, editing, saving, and playtesting levels.
 - Adds public community-map browsing and downloads directly to Discover.
@@ -56,7 +57,9 @@ The x86 BepInEx build can install without reporting an error, but it will not lo
 
 Keep Steam running, then create or join a party through the normal in-game menus. Invite a friend with Steam's normal **Invite to Game** action, or have them select **Join Game** from the Steam Friends list.
 
-Gameplay traffic travels peer-to-peer through Steam instead of the retired Bossa relay services. SS2 Revive does not restore Vivox voice or text chat.
+Gameplay traffic travels peer-to-peer through Steam instead of the retired Bossa relay services.
+
+Voice chat and party text chat also travel through Steam instead of the retired Vivox service. The existing **Off**, **Always On**, and **Push to Talk** modes, push-to-talk binding, volume sliders, speaking indicators, and per-player mute controls remain available in the normal game UI. Steam and Windows select the active microphone.
 
 ### Browse community maps
 
@@ -138,6 +141,7 @@ Defaults provide the intended restored experience. The most useful settings are:
 | `Security.HardenLevelReader` | `true` | Bounds level allocations and restricts untrusted old formats. Leave enabled. |
 | `Backend.Mode` | `Local` | Answers retired progression and inventory calls inside the mod. `Off` is diagnostic only. |
 | `Backend.GrantAllCosmetics` | `true` | Unlocks catalogued cosmetics. Disable it to earn them through progression. |
+| `Progression.SetLevelTo50OnNextLaunch` | `false` | One-shot restore that raises the signed-in local account to level 50 on the next launch, never lowers existing progress, then resets itself to `false`. Requires `Backend.Mode = Local`. |
 | `Backend.SaveDirectory` | *(empty)* | Overrides the default SS2 Revive data directory. |
 | `CreationMode.Enabled` | `true` | Enables local Creation Mode saves. |
 | `CreationMode.LevelSharing` | `true` | Enables direct export/import and online publishing controls. |
@@ -150,6 +154,7 @@ Defaults provide the intended restored experience. The most useful settings are:
 | `FreeForAll.Enabled` | `true` | Builds the Free-for-all queue from available levels. |
 | `FreeForAll.IncludeGameLevels` | `true` | Uses bundled game levels when no suitable custom maps are installed. |
 | `Party.SteamP2PTransport` | `true` | Carries multiplayer traffic through Steam P2P. |
+| `VoiceChat.SteamReplacement` | `true` | Restores voice and party text chat through Steam while keeping the game's existing voice settings and controls. |
 | `NewsFeed.Enabled` | `true` | Uses the local replacement news feed. |
 | `Diagnostics.ProbeKey` | `F9` | Writes a diagnostic state dump to the BepInEx log. |
 

@@ -1,4 +1,5 @@
 using System;
+using Services;
 using SS2ReviveData;
 using UnityEngine;
 
@@ -22,6 +23,13 @@ namespace SS2Revive
         internal static LocalBackend Backend => _backend;
 
         private static bool _identityResolved;
+
+        // A one-shot restore may race a stale offline ProgressionData write during startup. Keep
+        // the floor for the rest of that process so the old copy cannot undo a restore that was
+        // already durably written to the local backend.
+        private static bool _level50FloorThisSession;
+        private static long _level50Xp;
+        private static bool _level50WarningLogged;
 
         internal static void Initialise()
         {
@@ -102,6 +110,110 @@ namespace SS2Revive
                 backend.SetUserName(playerId, personaName);
 
             Plugin.Log.LogInfo("Local backend is serving " + playerId + " as the local player.");
+
+            // Do not consume the request against the temporary offline identity. Doing that would
+            // raise a placeholder record and leave the real Steam account untouched when Steam
+            // finishes initialising on a later frame.
+            if (steamId != 0UL)
+                TryApplyLevel50Restore(playerId);
+        }
+
+        /// <summary>
+        /// Applies the opt-in level restore to the authoritative local record before the game asks
+        /// the backend for progression. Level 50 begins at the level-49 completion threshold: the
+        /// game's progression code increments the visible level after crossing each entry.
+        /// </summary>
+        private static void TryApplyLevel50Restore(string playerId)
+        {
+            if (Plugin.SetLevelTo50OnNextLaunch == null
+                || !Plugin.SetLevelTo50OnNextLaunch.Value)
+            {
+                return;
+            }
+
+            var backend = _backend;
+            var track = backend?.Catalogue?.RewardTrack;
+            if (backend == null || track == null)
+                return;
+
+            long threshold = -1;
+            for (var i = 0; i < track.Count; i++)
+            {
+                if (track[i].Level != 49) continue;
+                threshold = track[i].CumulativeXp;
+                break;
+            }
+
+            if (threshold < 0)
+            {
+                if (!_level50WarningLogged)
+                {
+                    _level50WarningLogged = true;
+                    Plugin.Log.LogWarning("Level 50 restore is still armed, but the installed "
+                                         + "progression catalogue has no level-49 XP threshold. "
+                                         + "The setting was left enabled so a corrected install "
+                                         + "can try again next launch.");
+                }
+                return;
+            }
+
+            var currentLevel = 1;
+            long currentXp = 0;
+            var currentGlobalLevel = 1;
+            backend.TryGetLocalProgression(
+                out currentLevel, out currentXp, out currentGlobalLevel);
+
+            _level50Xp = Math.Max(currentXp, threshold);
+            _level50FloorThisSession = true;
+
+            if (currentLevel < 50 || currentGlobalLevel < 50)
+                backend.MirrorProgression(playerId, _level50Xp,
+                    Math.Max(currentLevel, 50), Math.Max(currentGlobalLevel, 50));
+
+            Plugin.SetLevelTo50OnNextLaunch.Value = false;
+            try
+            {
+                Plugin.Instance.Config.Save();
+            }
+            catch (Exception ex)
+            {
+                // The progression itself is already durable. Report the config failure so the
+                // player knows the harmless one-shot may run again on their next launch.
+                Plugin.Log.LogWarning("Level 50 was restored, but the one-shot setting could not "
+                                     + "be reset on disk: " + ex.Message);
+            }
+
+            Plugin.Log.LogInfo(currentLevel < 50 || currentGlobalLevel < 50
+                ? "Progression restore complete: the local Steam account is now level 50 ("
+                  + _level50Xp + " XP). The one-shot setting has been reset to false."
+                : "Progression restore found the local Steam account already at level 50 or "
+                  + "higher. No progress was lowered; the one-shot setting has been reset to false.");
+        }
+
+        /// <summary>
+        /// Makes the game's own PlayerProgression file agree with a restore and blocks a stale
+        /// startup value from being mirrored back over the authoritative record.
+        /// </summary>
+        internal static void EnforceProgressionFloor(
+            string playerId, ref PlayerProgressionService.ProgressionData progressionData)
+        {
+            if (!_level50FloorThisSession
+                || (progressionData.Level.SeasonLevel >= 50
+                    && progressionData.Level.GlobalLevel >= 50))
+                return;
+
+            var backend = _backend;
+            if (backend == null
+                || !string.Equals(backend.LocalPlayerId, playerId, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            progressionData.SeasonXp = (int)Math.Min(int.MaxValue,
+                Math.Max(progressionData.SeasonXp, _level50Xp));
+            progressionData.Level = new PlayerProgressionService.ProgressionLevel(
+                Math.Max(progressionData.Level.SeasonLevel, 50),
+                Math.Max(progressionData.Level.GlobalLevel, 50));
         }
 
         internal static LocalResponse Handle(string verb, string path, string body)
