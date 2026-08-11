@@ -41,8 +41,12 @@ jobs:
             throw "Release tags must use the exact vMAJOR.MINOR.PATCH form. Received: $tag"
           }
 
-          [xml]$props = Get-Content -LiteralPath 'Directory.Build.props'
-          $projectVersion = [string]$props.Project.PropertyGroup.SS2ReviveVersion
+          [xml]$props = Get-Content -LiteralPath 'Directory.Build.props' -Raw
+          $versionNode = $props.SelectSingleNode('//SS2ReviveVersion')
+          if ($null -eq $versionNode -or [string]::IsNullOrWhiteSpace($versionNode.InnerText)) {
+            throw 'SS2ReviveVersion is missing from Directory.Build.props.'
+          }
+          $projectVersion = $versionNode.InnerText.Trim()
           $version = $Matches.version
           if ($projectVersion -ne $version) {
             throw "Tag $tag does not match SS2ReviveVersion $projectVersion."
