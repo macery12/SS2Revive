@@ -406,18 +406,18 @@ namespace SS2ReviveData
     /// Null-tolerant readers, so parsing a document with a missing key reads as a default instead
     /// of needing a check at every access.
     /// </summary>
-    internal static class JsonDefaults
+    public static class JsonDefaults
     {
-        internal static string AsStringOr(this Json value, string fallback) =>
+        public static string AsStringOr(this Json value, string fallback) =>
             value == null ? fallback : value.AsString(fallback);
 
-        internal static int AsIntOr(this Json value, int fallback) =>
+        public static int AsIntOr(this Json value, int fallback) =>
             value == null ? fallback : value.AsInt(fallback);
 
-        internal static long AsLongOr(this Json value, long fallback) =>
+        public static long AsLongOr(this Json value, long fallback) =>
             value == null ? fallback : value.AsLong(fallback);
 
-        internal static double AsDoubleOr(this Json value, double fallback) =>
+        public static double AsDoubleOr(this Json value, double fallback) =>
             value == null ? fallback : value.AsDouble(fallback);
 
         internal static bool AsBoolOr(this Json value, bool fallback) =>

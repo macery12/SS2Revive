@@ -1,0 +1,27 @@
+{
+  "name": "@ss2revive/community-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "check": "wrangler types worker-configuration.d.ts --include-runtime false --strict-vars false --check && tsc --noEmit",
+    "types": "wrangler types worker-configuration.d.ts --include-runtime false --strict-vars false",
+    "dev": "wrangler dev --local --ip 127.0.0.1",
+    "db:migrate:local": "wrangler d1 migrations apply ss2revive-community-local --local",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@ss2revive/community-contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.20.3",
+    "@cloudflare/workers-types": "5.20260804.1",
+    "@types/node": "26.2.0",
+    "@vitest/coverage-istanbul": "4.1.10",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10",
+    "wrangler": "4.120.0"
+  }
+}

@@ -64,7 +64,10 @@ namespace SS2Revive
         internal static ConfigEntry<bool> LocalParty;
         internal static ConfigEntry<bool> HttpFailFast;
         internal static ConfigEntry<bool> SkipMatchmaking;
+        internal static ConfigEntry<bool> HardenLevelReader;
         internal static ConfigEntry<bool> CreationMode;
+        internal static ConfigEntry<bool> LevelSharingEnabled;
+        internal static ConfigEntry<string> CommunityCatalogUrl;
         internal static ConfigEntry<bool> FreeForAll;
         internal static ConfigEntry<bool> FreeForAllIncludeGameLevels;
         internal static ConfigEntry<BackendMode> Backend;
@@ -107,13 +110,40 @@ namespace SS2Revive
                 "Start levels with whoever is already in the party instead of holding the vactube "
                 + "screen open for strangers. Bossa's matchmaking server is gone, so the wait can "
                 + "only ever time out.");
+            HardenLevelReader = Config.Bind("Security", "HardenLevelReader", true,
+                "Put bounds on the level file reader. The format lets a file declare its own voxel "
+                + "dimensions and its own decompressed size with nothing checking either, so a "
+                + "level built to do so can ask for an allocation no machine can satisfy. That "
+                + "matters in a party, where the host's level is sent to everyone: one bad level "
+                + "would take out the whole lobby rather than one player. Custom/shared maps must "
+                + "use current format 29; older maps are accepted only when their SHA-256 exactly "
+                + "matches a level in this installation's bundled catalogue. Leave this on.");
             CreationMode = Config.Bind("CreationMode", "Enabled", true,
                 "Keep the level editor working by saving levels to this machine instead of Bossa's "
                 + "UGC service. Without it, loading into Creation Mode hangs on a black screen: the "
                 + "game uploads a new level before it will open it, and that upload can no longer "
                 + "complete or fail. Levels go to the SS2Revive folder beside your other saves, one "
-                + "folder each. Publishing works, but only you can see the result - there is no "
-                + "shared level browser left to publish to.");
+                + "folder each. Saved levels can be published to the restored community browser "
+                + "after Steam authentication.");
+            LevelSharingEnabled = Config.Bind("CreationMode", "LevelSharing", true,
+                "Turn the terminal's Share button into an Export button, and add an Import button "
+                + "to the Create screen. Export writes the level to one .ss2level file and copies "
+                + "the game's own 22-character share code to the clipboard; import reads any "
+                + ".ss2level file left in the import folder. Both folders sit beside your saves, in "
+                + "the SS2Revive folder. Send the file however you like and post the code with it - "
+                + "the terminal's search box has always accepted a code, so once somebody has "
+                + "imported the file, the code finds the level on their machine too. Manually "
+                + "imported levels are published only in the local library and stay credited to "
+                + "whoever built them, so they can be played and browsed but not edited.");
+            // This intentionally uses a new key. Older builds wrote an empty CommunityCatalogUrl
+            // into existing config files; reusing it would silently keep the new public service
+            // disabled for every upgrading player.
+            CommunityCatalogUrl = Config.Bind("CommunityMaps", "ApiCatalogUrl",
+                "https://community.m12labs.net/v1/catalog",
+                "HTTPS URL of the public SS2Revive community-map catalogue. Published maps are "
+                + "merged into Discover without requiring a login. Bundles and thumbnails are "
+                + "checksum-verified, cached, and installed locally only when opened. Leave this "
+                + "empty only when a completely local library is desired.");
             FreeForAll = Config.Bind("FreeForAll", "Enabled", true,
                 "Draw the Free-for-all queue from the levels on this machine. Bossa served that "
                 + "queue from a curated slice of what the community had published, so without this "
@@ -149,7 +179,7 @@ namespace SS2Revive
                 + "without this they stay white.");
             NewsFeedUrl = Config.Bind("NewsFeed", "Url", "",
                 "Where to fetch NewsFeed.json and images/ from. Leave empty to read them out of "
-                + "BepInEx/plugins/SS2Revive/newsfeed/, which needs no server. Set an http(s) URL "
+                + "BepInEx/plugins/SS2Revive/newsfeed/, which needs no server. Set an https:// URL "
                 + "with a trailing slash to serve the feed to several machines from one place.");
 
             SteamTransport = Config.Bind("Party", "SteamP2PTransport", true,
@@ -224,9 +254,9 @@ namespace SS2Revive
                 Log.LogError("Build 1.5.0 was the offline patch, and it removed the netcode this "
                              + "mod exists to restore - there is nothing left for the party, "
                              + "transport and backend patches to attach to.");
-                Log.LogError($"Install build {TestedGameVersion} instead. installCurrentVersion.ps1 "
-                             + "in the mod's repository downloads it from Steam for an account "
-                             + "that owns the game.");
+                Log.LogError($"Install build {TestedGameVersion} instead. SS2Revive-Setup.exe "
+                             + "from the latest release downloads it from Steam for an account "
+                             + "that owns the game, then installs BepInEx and this mod.");
                 Log.LogError("Everything below this line is a consequence of that, not a separate "
                              + "problem.");
                 Log.LogError("=====================================================================");

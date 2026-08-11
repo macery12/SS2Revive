@@ -1,0 +1,6 @@
+# Copy this file to .dev.vars and replace the value with a base64-encoded 32-byte random secret.
+# PowerShell example:
+#   $bytes = [byte[]]::new(32)
+#   [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+#   [Convert]::ToBase64String($bytes)
+LOCAL_AUTH_SECRET=<generate-a-local-secret-at-least-32-characters-long>

@@ -6,7 +6,7 @@
     Produces dist\SS2Revive-<version>.zip holding exactly what the README tells a player to copy
     into BepInEx\plugins\SS2Revive: both DLLs and the newsfeed folder.
 
-    installCurrentVersion.ps1 finds it by asking GitHub for the latest release and taking the
+    SS2Revive Setup finds it by asking GitHub for the latest release and taking the
     SS2Revive-*.zip attached to it, so the version in the filename does not have to be known
     ahead of time - only the shape of the name.
 
@@ -146,7 +146,7 @@ try {
     Write-Host ""
     Write-Host "$zip ($size KB)" -ForegroundColor Green
     Write-Host "Its contents go in BepInEx\plugins\SS2Revive\." -ForegroundColor Cyan
-    Write-Host "Attach it to a v$version release as-is; installCurrentVersion.ps1 finds it by" -ForegroundColor Cyan
+    Write-Host "Attach it to a v$version release as-is; SS2Revive Setup finds it by" -ForegroundColor Cyan
     Write-Host "asking GitHub for the newest release and taking its SS2Revive-*.zip." -ForegroundColor Cyan
 }
 catch {

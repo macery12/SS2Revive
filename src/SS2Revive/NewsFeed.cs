@@ -43,7 +43,7 @@ namespace SS2Revive
             ""ImageUrl"": ""tile-1.png"",
             ""ClickUrl"": """",
             ""Title"": ""Multiplayer Restored"",
-            ""SubTitle"": ""Parties, invites and peer-to-peer play now run over Steam. Press F10 in a lobby to invite a friend.""
+            ""SubTitle"": ""Parties, invites and peer-to-peer play now run over Steam. Invite friends or join them through Steam's Friends list.""
         },
         {
             ""ImageUrl"": ""tile-2.png"",
@@ -75,9 +75,26 @@ namespace SS2Revive
         {
             if (!string.IsNullOrEmpty(configuredUrl))
             {
-                BaseUrl = configuredUrl.EndsWith("/") ? configuredUrl : configuredUrl + "/";
-                Plugin.Log.LogInfo("News feed served from " + BaseUrl);
-                return BaseUrl;
+                // Tiles carry a ClickUrl the game opens on click, so a plaintext feed lets anyone
+                // on the network rewrite what the player sees and where clicking takes them.
+                // Require the same absolute-HTTPS shape the community catalogue client enforces.
+                Uri parsed;
+                if (!Uri.TryCreate(configuredUrl, UriKind.Absolute, out parsed)
+                    || parsed.Scheme != Uri.UriSchemeHttps
+                    || !string.IsNullOrEmpty(parsed.UserInfo)
+                    || !string.IsNullOrEmpty(parsed.Query)
+                    || !string.IsNullOrEmpty(parsed.Fragment))
+                {
+                    Plugin.Log.LogWarning(
+                        "Ignoring the configured news feed URL: it must be an absolute https:// URL "
+                        + "with no credentials, query or fragment. Falling back to the local feed.");
+                }
+                else
+                {
+                    BaseUrl = configuredUrl.EndsWith("/") ? configuredUrl : configuredUrl + "/";
+                    Plugin.Log.LogInfo("News feed served from " + BaseUrl);
+                    return BaseUrl;
+                }
             }
 
             try

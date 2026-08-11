@@ -9,7 +9,7 @@
     zip cannot drift apart.
   -->
   <PropertyGroup Label="Version">
-    <SS2ReviveVersion>1.1.0</SS2ReviveVersion>
+    <SS2ReviveVersion>1.2.0</SS2ReviveVersion>
   </PropertyGroup>
 
   <!--

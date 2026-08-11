@@ -436,6 +436,12 @@ namespace SS2Revive
         private static bool GetResource_Prefix(string resourceUrl, Action<byte[]> succeedDelegate,
                                                Action failedDelegate)
         {
+            if (CommunityCatalogClient.OwnsKey(resourceUrl))
+            {
+                CommunityCatalogClient.ReadKey(resourceUrl, succeedDelegate, failedDelegate);
+                return false;
+            }
+
             if (!UgcBackend.OwnsKey(resourceUrl)) return true;
 
             var bytes = UgcBackend.ReadKey(resourceUrl);

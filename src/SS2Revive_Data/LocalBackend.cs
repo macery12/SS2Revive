@@ -264,8 +264,8 @@ namespace SS2ReviveData
             if (isGet && Is(segments, "version"))
             {
                 return LocalResponse.Ok(Json.Object()
-                    .Add("minimumVersion", "1.3.1.276")
-                    .Add("currentVersion", "1.3.1.276"));
+                    .Add("minimumVersion", "1.3.7.3054")
+                    .Add("currentVersion", "1.3.7.3054"));
             }
 
             if (isGet && Is(segments, "status"))

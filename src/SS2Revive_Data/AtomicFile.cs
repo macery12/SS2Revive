@@ -20,17 +20,17 @@ namespace SS2ReviveData
     /// Replace only works within one volume and refuses some filesystems outright, so the
     /// delete-then-move path is kept as the fallback. That is no worse than what this replaced.
     /// </summary>
-    internal static class AtomicFile
+    public static class AtomicFile
     {
-        internal const string BackupSuffix = ".bak";
+        public const string BackupSuffix = ".bak";
 
-        internal static void WriteAllText(string path, string contents, Encoding encoding,
-                                          bool keepBackup = false)
+        public static void WriteAllText(string path, string contents, Encoding encoding,
+                                        bool keepBackup = false)
         {
             Write(path, keepBackup, temporary => File.WriteAllText(temporary, contents, encoding));
         }
 
-        internal static void WriteAllBytes(string path, byte[] contents, bool keepBackup = false)
+        public static void WriteAllBytes(string path, byte[] contents, bool keepBackup = false)
         {
             Write(path, keepBackup, temporary => File.WriteAllBytes(temporary, contents));
         }

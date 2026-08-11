@@ -1,0 +1,21 @@
+#!/bin/sh
+# Blocks a push that would publish a credential.
+#
+# This runs here rather than in CI on purpose. A secret-scanning job on GitHub Actions only fires
+# after the objects are already on GitHub, where they stay reachable through the API even if the
+# branch is deleted, so a red build reports the leak instead of preventing it. CI runs the checks
+# that are still useful once the code is public: the dependency audit, the type check, the tests.
+#
+# Enable in a fresh clone with:   git config core.hooksPath .githooks
+# Bypass deliberately with:       git push --no-verify
+set -e
+
+root=$(git rev-parse --show-toplevel)
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "pre-push: node is not on PATH, so the secret scan cannot run." >&2
+  echo "pre-push: install Node or push with --no-verify if you have checked the diff yourself." >&2
+  exit 1
+fi
+
+node "$root/backend/scripts/secret-scan.mjs"

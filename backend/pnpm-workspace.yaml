@@ -1,0 +1,7 @@
+packages:
+  - community-contracts
+  - community-api
+allowBuilds:
+  esbuild: true
+  workerd: true
+confirmModulesPurge: false
