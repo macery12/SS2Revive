@@ -8,6 +8,7 @@ import {
   MAX_IMAGE_BYTES,
   MAX_MANIFEST_BYTES,
   MAX_METADATA_ITEM_CHARACTERS,
+  MAX_STRUCTURED_METADATA_BYTES,
   MAX_TAGS,
   MAX_TITLE_CHARACTERS,
 } from "./types";
@@ -20,6 +21,7 @@ const MAX_ENTRIES = 16;
 const MAX_NAME_BYTES = 64;
 const MAX_JSON_DEPTH = 32;
 const MAX_INT32 = 2_147_483_647;
+const CLOCK_SKEW_TOLERANCE_MS = 5 * 60 * 1000;
 
 export type BundleValidationCode =
   | "bundle_empty"
@@ -28,6 +30,7 @@ export type BundleValidationCode =
   | "bundle_version_invalid"
   | "bundle_malformed"
   | "bundle_too_many_entries"
+  | "bundle_unknown_entry"
   | "bundle_duplicate_entry"
   | "bundle_entry_oversized"
   | "bundle_trailing_data"
@@ -35,6 +38,7 @@ export type BundleValidationCode =
   | "manifest_invalid"
   | "manifest_duplicate_key"
   | "manifest_metadata_invalid"
+  | "manifest_metadata_oversized"
   | "content_missing"
   | "content_magic_invalid"
   | "content_format_invalid"
@@ -114,8 +118,7 @@ function equalPrefix(bytes: Uint8Array, expected: Uint8Array): boolean {
 function entryLimit(name: string): number {
   if (name === "asset.json") return MAX_MANIFEST_BYTES;
   if (name === "level.bin") return MAX_CONTENT_BYTES;
-  if (name === "level.png" || name === "thumb.png") return MAX_IMAGE_BYTES;
-  return MAX_MANIFEST_BYTES;
+  return MAX_IMAGE_BYTES;
 }
 
 function parseEntries(bytes: Uint8Array): { containerVersion: 2; entries: ParsedEntries } {
@@ -157,12 +160,17 @@ function parseEntries(bytes: Uint8Array): { containerVersion: 2; entries: Parsed
     if (length < 0 || length > bytes.length - offset) {
       fail("bundle_malformed", "The bundle entry length is invalid.");
     }
-    if (length > entryLimit(name)) {
-      fail("bundle_entry_oversized", `The ${name || "unnamed"} entry exceeds its limit.`);
+    // An unrecognised entry used to be skipped, so a publisher could staple megabytes of arbitrary
+    // bytes to a bundle that is then promoted verbatim and served from a public immutable path.
+    // Only the four entries this format defines may appear, and only once each. The name is
+    // attacker-controlled, so it is never interpolated into an error the uploader can read back.
+    if (!KNOWN_ENTRIES.has(name)) {
+      fail("bundle_unknown_entry", "The bundle contains an entry this level format does not define.");
     }
-    if (KNOWN_ENTRIES.has(name)) {
-      if (known.has(name)) fail("bundle_duplicate_entry", `The ${name} entry appears more than once.`);
-      known.add(name);
+    if (known.has(name)) fail("bundle_duplicate_entry", "A bundle entry appears more than once.");
+    known.add(name);
+    if (length > entryLimit(name)) {
+      fail("bundle_entry_oversized", "A bundle entry exceeds its limit.");
     }
 
     if (name === "asset.json") entries.manifest = bytes.slice(offset, offset + length);
@@ -350,6 +358,21 @@ function requireStringArray(value: unknown, name: string, maximumItems: number, 
   return result;
 }
 
+/**
+ * The catalogue echoes tags, configurations and validations back verbatim, so their serialized
+ * size — not just their element counts — decides what one map costs every reader. Charge the
+ * publisher for the exact bytes the listing will carry.
+ */
+function requireMetadataBudget(tags: string[], configurations: unknown[], validations: unknown[]): void {
+  const serialized = JSON.stringify({ tags, configurations, validations });
+  if (new TextEncoder().encode(serialized).length > MAX_STRUCTURED_METADATA_BYTES) {
+    fail(
+      "manifest_metadata_oversized",
+      "The level tags, configurations and validations exceed the published metadata budget.",
+    );
+  }
+}
+
 function validateStructuredMetadata(configurations: unknown, validations: unknown): {
   configurations: unknown[];
   validations: unknown[];
@@ -445,7 +468,14 @@ function parseManifest(bytes: Uint8Array, containerVersion: 2, nowMs: number): B
   const description = requireString(raw.description, "description", MAX_DESCRIPTION_CHARACTERS, true);
   const createdAt = requireInteger(raw.createdAt, "createdAt");
   const exportedAt = requireInteger(raw.exportedAt, "exportedAt");
-  if (exportedAt < createdAt || createdAt > nowMs + 86_400_000 || exportedAt > nowMs + 86_400_000) {
+  // A future exportedAt becomes updated_at_ms, which is the default catalogue sort key. The old
+  // 24-hour allowance let a publisher pin a map above every legitimate entry for a day and hold
+  // the top slot by re-uploading. Permit only enough slack to absorb client clock skew; the
+  // publisher additionally clamps the stored value to server time.
+  if (
+    exportedAt < createdAt || createdAt > nowMs + CLOCK_SKEW_TOLERANCE_MS ||
+    exportedAt > nowMs + CLOCK_SKEW_TOLERANCE_MS
+  ) {
     fail("manifest_metadata_invalid", "The manifest timestamps are inconsistent.");
   }
   const clientVersion = requireInteger(raw.clientVersion, "clientVersion", MAP_FORMAT_VERSION, MAP_FORMAT_VERSION);
@@ -455,6 +485,7 @@ function parseManifest(bytes: Uint8Array, containerVersion: 2, nowMs: number): B
   const creators = requireStringArray(raw.creators, "creators", MAX_CREATORS);
   const tags = requireStringArray(raw.tags, "tags", MAX_TAGS);
   const structured = validateStructuredMetadata(raw.configurations, raw.validations);
+  requireMetadataBudget(tags, structured.configurations, structured.validations);
 
   return {
     bundleVersion: bundleVersion as 2,
@@ -638,10 +669,13 @@ export function inspectGameImage(bytes: Uint8Array): GameImageInfo {
     fail("image_invalid", "The game image header is truncated.");
   }
   const bytesPerPixel = new Map<number, number>([[1, 1], [2, 2], [3, 3], [4, 4], [5, 4], [7, 2]]).get(format);
+  // Every supported format id is an uncompressed linear layout and the header carries no mip
+  // count, so the payload length is fully determined by the dimensions. Accepting a payload merely
+  // *at least* that large let a 1x1 image smuggle 8 MiB of arbitrary bytes into a published bundle.
   if (
     width < 1 || height < 1 || width > 2048 || height > 2048 || width * height > 4 * 1024 * 1024 ||
     dataLength < 1 || dataLength > MAX_IMAGE_BYTES || bytesPerPixel === undefined ||
-    width * height * bytesPerPixel > dataLength || 13 + dataLength !== bytes.length
+    width * height * bytesPerPixel !== dataLength || 13 + dataLength !== bytes.length
   ) {
     fail("image_invalid", "The game image dimensions, format, or payload length is unsafe.");
   }

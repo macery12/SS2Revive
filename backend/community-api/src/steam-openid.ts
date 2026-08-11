@@ -15,6 +15,7 @@ interface OpenIdSessionRow {
   return_to: string;
   steam_id64: string | null;
   expires_at: number;
+  user_code: string | null;
 }
 
 function escapeHtml(value: string): string {
@@ -22,14 +23,60 @@ function escapeHtml(value: string): string {
     .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 
-function htmlResponse(html: string, status: number, requestId: string): Response {
-  return new Response(html, {
-    status,
-    headers: responseHeaders(requestId, {
-      "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy": "default-src 'none'; form-action 'self' https://steamcommunity.com; frame-ancestors 'none'; base-uri 'none'",
-    }),
-  });
+const PAGE_STYLES = `
+:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;background:#0c151c;color:#eaf1f5}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:#0c151c;display:grid;place-items:center;padding:32px 18px}
+.shell{width:min(100%,680px)}
+.brand{display:flex;align-items:baseline;gap:10px;margin:0 0 16px 4px;letter-spacing:.08em;text-transform:uppercase}
+.brand strong{font-family:Georgia,"Times New Roman",serif;font-size:24px;letter-spacing:.04em;color:#fff}
+.brand span{font-size:12px;font-weight:750;color:#8ea6b5}
+.card{background:#14222c;border:1px solid #31444f;border-top:4px solid #e7a84c;box-shadow:0 18px 55px rgba(0,0,0,.28);padding:clamp(26px,6vw,48px)}
+.eyebrow{margin:0 0 8px;color:#e7a84c;font-size:12px;font-weight:800;letter-spacing:.14em;text-transform:uppercase}
+h1{font-family:Georgia,"Times New Roman",serif;font-size:clamp(31px,7vw,46px);line-height:1.04;letter-spacing:-.02em;margin:0 0 18px;color:#fff}
+p{font-size:16px;line-height:1.65;margin:0 0 18px;color:#c6d3da}
+.lede{font-size:18px;color:#e4ebef}
+.notice{border-left:3px solid #e7a84c;background:#101c24;padding:14px 16px;margin:24px 0;color:#dbe5ea}
+.notice strong{color:#fff}
+form{margin-top:26px}
+label{display:block;margin-bottom:9px;font-size:14px;font-weight:750;color:#f3f6f8}
+.hint{display:block;margin:8px 0 0;font-size:13px;line-height:1.5;color:#93a8b5}
+input[type=text]{width:100%;height:60px;border:1px solid #5f7582;background:#0a1218;color:#fff;border-radius:2px;padding:0 16px;font:700 24px/1 ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.18em;text-transform:uppercase}
+input:focus-visible,button:focus-visible,a:focus-visible{outline:3px solid #8fd4e8;outline-offset:3px}
+.facts{display:grid;grid-template-columns:minmax(110px,.55fr) 1fr;border-top:1px solid #31444f;margin:24px 0}
+.facts dt,.facts dd{margin:0;padding:13px 0;border-bottom:1px solid #31444f}
+.facts dt{color:#8ea6b5;font-size:13px;font-weight:750;text-transform:uppercase;letter-spacing:.06em}
+.facts dd{color:#fff;font-weight:700;overflow-wrap:anywhere}
+.device-code{font:800 22px/1 ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:.12em}
+.actions{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-top:26px}
+button,.button{appearance:none;border:0;border-radius:2px;background:#e7a84c;color:#172028;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;min-height:52px;padding:0 22px;font:800 15px/1 ui-sans-serif,system-ui,sans-serif;text-decoration:none}
+button:hover,.button:hover{background:#f3ba68}
+.text-link{color:#a8d8e6;font-weight:700;text-underline-offset:3px}
+.site{margin:15px 4px 0;color:#708895;font-size:12px;letter-spacing:.04em}
+.request{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#78909d;overflow-wrap:anywhere}
+@media(max-width:520px){body{padding:0}.shell{width:100%}.brand{margin:18px}.card{border-left:0;border-right:0;padding:28px 20px}.facts{grid-template-columns:1fr}.facts dt{border-bottom:0;padding-bottom:3px}.facts dd{padding-top:3px}.actions button,.actions .button{width:100%}}
+`;
+
+function htmlResponse(
+  title: string,
+  content: string,
+  status: number,
+  requestId: string,
+  extraHeaders?: HeadersInit,
+): Response {
+  const nonce = randomToken();
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark">
+<title>${escapeHtml(title)}</title><style nonce="${nonce}">${PAGE_STYLES}</style></head>
+<body><main class="shell"><header class="brand"><strong>SS2Revive</strong><span>Community maps</span></header>
+<section class="card">${content}</section><p class="site">community.m12labs.net</p></main></body></html>`;
+  const headers = responseHeaders(requestId, extraHeaders);
+  headers.set("Content-Type", "text/html; charset=utf-8");
+  headers.set(
+    "Content-Security-Policy",
+    `default-src 'none'; style-src 'nonce-${nonce}'; form-action 'self' https://steamcommunity.com; frame-ancestors 'none'; base-uri 'none'`,
+  );
+  return new Response(html, { status, headers });
 }
 
 function exactParameter(parameters: URLSearchParams, name: string, maximum = 2048): string {
@@ -156,14 +203,21 @@ export function steamActivationPage(request: Request, requestId: string): Respon
   if (request.method !== "GET") {
     throw new HttpError(405, "method_not_allowed", "The method is not allowed.", { Allow: "GET" });
   }
-  const code = new URL(request.url).searchParams.get("user_code")?.toUpperCase() ?? "";
-  const value = /^[A-Z2-9]{4}-[A-Z2-9]{4}$/u.test(code) ? code : "";
-  return htmlResponse(`<!doctype html><html><head><meta charset="utf-8"><title>Link SS2Revive to Steam</title></head>
-<body><main><h1>Link SS2Revive to Steam</h1><p>Enter the code shown by SS2Revive, then sign in on Steam.</p>
-<p>SS2Revive never receives your Steam password.</p>
-<form method="post" action="/v1/auth/steam/start"><label>Device code
-<input name="user_code" value="${escapeHtml(value)}" pattern="[A-Z2-9]{4}-[A-Z2-9]{4}" autocomplete="one-time-code" required></label>
-<button type="submit">Continue to Steam</button></form></main></body></html>`, 200, requestId);
+  const suppliedCodes = new URL(request.url).searchParams.getAll("user_code");
+  const suppliedCode = suppliedCodes.length === 1 ? suppliedCodes[0]!.toUpperCase() : "";
+  const code = /^[A-Z2-9]{4}-[A-Z2-9]{4}$/u.test(suppliedCode) ? suppliedCode : "";
+  return htmlResponse("Connect SS2Revive to Steam", `
+<p class="eyebrow">Steam account link</p><h1>Connect SS2Revive</h1>
+<p class="lede">Confirm the code from the game, then continue to Steam in the next step.</p>
+<div class="notice"><strong>Only continue if SS2Revive opened this page for you.</strong>
+Never approve a code sent by another person. SS2Revive does not receive or store your Steam password.</div>
+<form method="post" action="/v1/auth/steam/start">
+<label for="user-code">Device code</label>
+<input id="user-code" name="user_code" value="${escapeHtml(code)}" maxlength="9"
+ pattern="[A-Za-z2-9]{4}-[A-Za-z2-9]{4}" autocomplete="one-time-code" autocapitalize="characters"
+ spellcheck="false" aria-describedby="code-hint" required autofocus>
+<span class="hint" id="code-hint">The same nine-character code must be visible inside SS2Revive.</span>
+<div class="actions"><button type="submit">Continue to Steam</button></div></form>`, 200, requestId);
 }
 
 export async function startSteamLogin(
@@ -196,16 +250,17 @@ export async function startSteamLogin(
   const id = crypto.randomUUID();
   const result = await env.DB.prepare(
     `INSERT INTO steam_openid_sessions
-       (id, device_session_id, state_hash, status, return_to, created_at, expires_at)
-     VALUES (?, ?, ?, 'pending', ?, ?, ?)
+       (id, device_session_id, state_hash, status, return_to, user_code, created_at, expires_at)
+     VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)
      ON CONFLICT(device_session_id) DO UPDATE SET
        id = excluded.id, state_hash = excluded.state_hash, status = 'pending',
-       return_to = excluded.return_to, steam_id64 = NULL, response_nonce_hash = NULL,
+       return_to = excluded.return_to, user_code = excluded.user_code, steam_id64 = NULL,
+       response_nonce_hash = NULL,
        confirm_token_hash = NULL, created_at = excluded.created_at,
        expires_at = excluded.expires_at, verified_at = NULL, confirmed_at = NULL
      WHERE steam_openid_sessions.status IN ('pending', 'failed')
         OR steam_openid_sessions.expires_at <= ?`,
-  ).bind(id, device.id, stateHash, returnTo, nowMs, nowMs + LOGIN_LIFETIME_MS, nowMs).run();
+  ).bind(id, device.id, stateHash, returnTo, code, nowMs, nowMs + LOGIN_LIFETIME_MS, nowMs).run();
   if ((result.meta.changes ?? 0) !== 1) {
     throw new HttpError(409, "steam_login_in_progress", "This device already has a verified Steam login to confirm.");
   }
@@ -236,7 +291,7 @@ export async function steamCallback(
   if (state.length !== 43) throw new HttpError(400, "steam_assertion_invalid", "Steam authentication could not be verified.");
   const stateHash = await opaqueHash(config, "steam-openid-state", state);
   const login = await env.DB.prepare(
-    `SELECT id, device_session_id, status, return_to, steam_id64, expires_at
+    `SELECT id, device_session_id, status, return_to, steam_id64, expires_at, user_code
        FROM steam_openid_sessions WHERE state_hash = ?`,
   ).bind(stateHash).first<OpenIdSessionRow>();
   if (login === null || login.status !== "pending" || login.expires_at <= nowMs) {
@@ -259,13 +314,18 @@ export async function steamCallback(
     throw new HttpError(400, "steam_assertion_invalid", "The Steam assertion was already used.");
   }
   if (updated === null) throw new HttpError(409, "steam_login_consumed", "The Steam login was already consumed.");
-  return htmlResponse(`<!doctype html><html><head><meta charset="utf-8"><title>Confirm SS2Revive link</title></head>
-<body><main><h1>Confirm device link</h1><p>Steam account ${escapeHtml(verified.steamId64)} was verified.</p>
-<p>Approve linking this Steam account to the SS2Revive device code you entered?</p>
+  return htmlResponse("Confirm SS2Revive link", `
+<p class="eyebrow">Steam verified</p><h1>Confirm this device</h1>
+<p class="lede">Steam accepted the account. Check the details against the game before approving it.</p>
+<dl class="facts"><dt>Steam ID</dt><dd>${escapeHtml(verified.steamId64)}</dd>
+<dt>Device code</dt><dd class="device-code">${escapeHtml(login.user_code ?? "unknown")}</dd></dl>
+<div class="notice"><strong>The code must exactly match the one visible in SS2Revive.</strong>
+If it differs&mdash;or you did not start this login&mdash;close this page without approving.</div>
 <form method="post" action="/v1/auth/steam/confirm">
 <input type="hidden" name="state" value="${escapeHtml(state)}">
 <input type="hidden" name="confirm_token" value="${escapeHtml(confirmToken)}">
-<button type="submit">Approve this device</button></form></main></body></html>`, 200, requestId);
+<div class="actions"><button type="submit">Approve this device</button>
+<a class="text-link" href="/activate">Cancel and start over</a></div></form>`, 200, requestId);
 }
 
 export async function confirmSteamLogin(
@@ -321,6 +381,19 @@ export async function confirmSteamLogin(
   if (confirmed?.[0]?.id !== login.id) {
     throw new HttpError(409, "steam_login_consumed", "The Steam login could not be confirmed.");
   }
-  return htmlResponse(`<!doctype html><html><head><meta charset="utf-8"><title>SS2Revive linked</title></head>
-<body><main><h1>Device approved</h1><p>Return to SS2Revive to finish signing in.</p></main></body></html>`, 200, requestId);
+  return htmlResponse("SS2Revive linked", `
+<p class="eyebrow">Device approved</p><h1>You're connected</h1>
+<p class="lede">Return to SS2Revive. The game will finish signing in automatically.</p>
+<div class="notice">You can close this browser tab. Manage or end this session with the
+<strong>Log out</strong> button in Creation Mode.</div>`, 200, requestId);
+}
+
+export function steamAuthErrorPage(error: HttpError, requestId: string): Response {
+  return htmlResponse("SS2Revive sign-in problem", `
+<p class="eyebrow">Sign-in stopped</p><h1>We couldn't continue</h1>
+<p class="lede">${escapeHtml(error.message)}</p>
+<div class="notice">Return to SS2Revive and start the sign-in again. Device codes expire and can
+only be approved once.</div>
+<div class="actions"><a class="button" href="/activate">Try another code</a></div>
+<p class="request">Request ${escapeHtml(requestId)}</p>`, error.status, requestId, error.headers);
 }

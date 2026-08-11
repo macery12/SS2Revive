@@ -4,8 +4,10 @@ import {
   isSemanticVersion,
   isSha256,
   MAX_BUNDLE_BYTES,
+  MAX_CATALOG_BYTES,
   MAX_DESCRIPTION_CHARACTERS,
   MAX_IMAGE_BYTES,
+  MAX_MAP_PAGE_BYTES,
   MAX_PAGE_SIZE,
   MAX_TITLE_CHARACTERS,
   parseBoundedPositiveInteger,
@@ -154,6 +156,38 @@ async function filterHash(query: string, tag: string, players: number | null, so
   return sha256Hex(new TextEncoder().encode(JSON.stringify({ query, tag, players, sort })));
 }
 
+/** Envelope headroom left for requestId, cursor, and the surrounding JSON structure. */
+const RESPONSE_ENVELOPE_BYTES = 4096;
+
+/**
+ * Serialize rows until the response budget is spent, then stop. Previously these listings threw a
+ * 503 whenever the total exceeded the budget, which let a publisher take the public catalogue
+ * offline for everyone simply by publishing a few maps with maximal metadata. Dropping the overflow
+ * keeps the listing available and self-healing; the first row is always included so pagination can
+ * never stall.
+ */
+function takeWithinBudget(rows: MapRow[], budgetBytes: number): {
+  selected: MapRow[];
+  items: CommunityMap[];
+  truncated: boolean;
+} {
+  const encoder = new TextEncoder();
+  const selected: MapRow[] = [];
+  const items: CommunityMap[] = [];
+  let remaining = budgetBytes - RESPONSE_ENVELOPE_BYTES;
+  for (const row of rows) {
+    const item = mapDto(row);
+    const cost = encoder.encode(JSON.stringify(item)).length + 1;
+    if (items.length > 0 && cost > remaining) {
+      return { selected, items, truncated: true };
+    }
+    remaining -= cost;
+    selected.push(row);
+    items.push(item);
+  }
+  return { selected, items, truncated: false };
+}
+
 export async function listMaps(
   request: Request,
   env: Env,
@@ -233,8 +267,8 @@ export async function listMaps(
     `${MAP_SELECT} WHERE ${clauses.join(" AND ")} ORDER BY ${order} LIMIT ?`,
   ).bind(...values, limit + 1).all<MapRow>();
   const rows = result.results;
-  const hasMore = rows.length > limit;
-  const selected = rows.slice(0, limit);
+  const { selected, items, truncated } = takeWithinBudget(rows.slice(0, limit), MAX_MAP_PAGE_BYTES);
+  const hasMore = rows.length > limit || truncated;
   let nextCursor: string | null = null;
   const last = selected.at(-1);
   if (hasMore && last !== undefined) {
@@ -250,11 +284,7 @@ export async function listMaps(
       iat: nowMs,
     });
   }
-  const page: MapPage & { requestId: string } = { requestId, items: selected.map(mapDto), nextCursor };
-  const serialized = JSON.stringify(page);
-  if (new TextEncoder().encode(serialized).length > 1024 * 1024) {
-    throw new HttpError(503, "temporarily_unavailable", "The bounded map response could not be produced.");
-  }
+  const page: MapPage & { requestId: string } = { requestId, items, nextCursor };
   return jsonResponse(page, 200, requestId);
 }
 
@@ -275,11 +305,8 @@ export async function catalogDocument(
       ORDER BY m.updated_at_ms DESC, m.id ASC
       LIMIT 2001`,
   ).all<MapRow>();
-  if (result.results.length > 2000) {
-    throw new HttpError(503, "temporarily_unavailable", "The bounded catalogue could not be produced.");
-  }
-  const maps = result.results.map((row) => {
-    const map = mapDto(row);
+  const { items, truncated } = takeWithinBudget(result.results.slice(0, 2000), MAX_CATALOG_BYTES);
+  const maps = items.map((map) => {
     const bundleKey = map.downloadUrl.startsWith("/v1/") ? map.downloadUrl.slice(4) : "";
     if (bundleKey === "") {
       throw new HttpError(503, "object_metadata_mismatch", "Stored bundle metadata is invalid.");
@@ -315,15 +342,23 @@ export async function catalogDocument(
     }
     return entry;
   });
+  // Catalogue entries carry a few more locator fields than the map DTO the budget was measured
+  // against, so trim once more against the real serialized size rather than failing the request.
+  const encoder = new TextEncoder();
+  let dropped = truncated;
+  while (
+    maps.length > 1 &&
+    encoder.encode(JSON.stringify({ schemaVersion: 1, generatedAtUtc: "", maps })).length > MAX_CATALOG_BYTES
+  ) {
+    maps.pop();
+    dropped = true;
+  }
   const document = {
     schemaVersion: 1,
     generatedAtUtc: new Date(nowMs).toISOString(),
+    truncated: dropped,
     maps,
   };
-  const serialized = JSON.stringify(document);
-  if (new TextEncoder().encode(serialized).length > 2 * 1024 * 1024) {
-    throw new HttpError(503, "temporarily_unavailable", "The bounded catalogue could not be produced.");
-  }
   return jsonResponse(document, 200, requestId, {
     "Cache-Control": "public, max-age=60, stale-while-revalidate=300",
   });
@@ -358,7 +393,10 @@ export async function mapVersions(env: Env, mapId: string, requestId: string): P
         AND v.client_version = 29 AND v.map_format_version = 29
       ORDER BY v.revision DESC LIMIT 50`,
   ).bind(mapId).all<MapRow>();
-  return jsonResponse({ requestId, items: result.results.map(mapDto), nextCursor: null }, 200, requestId);
+  // Every sibling listing bounds its response; this one did not, so 50 retained revisions of a
+  // maximal-metadata map turned a single anonymous GET into a large Worker/D1/egress amplifier.
+  const { items } = takeWithinBudget(result.results, MAX_MAP_PAGE_BYTES);
+  return jsonResponse({ requestId, items, nextCursor: null }, 200, requestId);
 }
 
 export async function downloadableVersion(env: Env, mapId: string, revision: number): Promise<MapRow> {

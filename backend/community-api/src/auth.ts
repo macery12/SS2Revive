@@ -82,6 +82,8 @@ export async function createDeviceSession(
     deviceSessionId: id,
     deviceSecret,
     userCode: code,
+    // The complete URL is a convenience, not approval: the browser still shows the code again
+    // after Steam verification and requires a deliberate code-match confirmation.
     activationPath: `/activate?user_code=${encodeURIComponent(code)}`,
     expiresAt: new Date(expiresAt).toISOString(),
     pollIntervalSeconds: 5,
@@ -359,7 +361,7 @@ export async function localActivationPage(
 <button type="submit">Approve local test device</button></form></main></body></html>`;
   const headers = responseHeaders(requestId, {
     "Content-Type": "text/html; charset=utf-8",
-    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+    "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
   });
   return new Response(html, { status: 200, headers });
 }

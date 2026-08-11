@@ -4,6 +4,7 @@ import {
   type AuthPrincipal,
 } from "@ss2revive/community-contracts";
 import type { RuntimeConfig } from "./config";
+import { purgeMapCache } from "./edge-cache";
 import { emptyResponse, HttpError, jsonResponse, readJsonObject, requireMethod } from "./http";
 
 const REPORT_REASONS = new Set([
@@ -81,6 +82,8 @@ async function readEmptyObject(request: Request): Promise<void> {
 export async function unpublishOwnMap(
   request: Request,
   env: Env,
+  config: RuntimeConfig,
+  ctx: ExecutionContext,
   principal: AuthPrincipal,
   mapId: string,
   requestId: string,
@@ -104,6 +107,7 @@ export async function unpublishOwnMap(
   if ((results[0]?.meta.changes ?? 0) !== 1) {
     throw new HttpError(409, "map_state_changed", "The map state changed before it could be unpublished.");
   }
+  purgeMapCache(ctx, config, mapId, [row.current_revision]);
   return jsonResponse({ requestId, mapId, status: "unpublished" }, 200, requestId, {
     "Cache-Control": "no-store",
   });
@@ -112,6 +116,8 @@ export async function unpublishOwnMap(
 export async function archiveOwnMap(
   request: Request,
   env: Env,
+  config: RuntimeConfig,
+  ctx: ExecutionContext,
   principal: AuthPrincipal,
   mapId: string,
   requestId: string,
@@ -135,6 +141,7 @@ export async function archiveOwnMap(
   if ((results[0]?.meta.changes ?? 0) !== 1) {
     throw new HttpError(409, "map_state_changed", "The map state changed before it could be archived.");
   }
+  purgeMapCache(ctx, config, mapId, [row.current_revision]);
   return emptyResponse(204, requestId);
 }
 
@@ -232,6 +239,7 @@ async function moderationAction(
   request: Request,
   env: Env,
   config: RuntimeConfig,
+  ctx: ExecutionContext,
   principal: AuthPrincipal,
   mapId: string,
   action: "takedown" | "restore",
@@ -250,6 +258,16 @@ async function moderationAction(
   }
   const map = await ownershipRow(env, mapId);
   if (map === null) throw new HttpError(404, "map_not_found", "The map was not found.");
+  // Restore undoes a maintainer takedown; it must not resurrect a map the owner themselves
+  // unpublished or deleted, and it must not republish something no takedown ever removed.
+  if (action === "restore") {
+    const moderated = await env.DB.prepare(
+      `SELECT moderation_reason FROM maps WHERE id = ? AND moderation_reason IS NOT NULL`,
+    ).bind(mapId).first<{ moderation_reason: string }>();
+    if (moderated === null) {
+      throw new HttpError(409, "map_not_moderated", "This map is not under a maintainer takedown.");
+    }
+  }
   const nextStatus = action === "takedown" ? "archived" : "published";
   const versionStatus = action === "takedown" ? "unpublished" : "published";
   const eventId = crypto.randomUUID();
@@ -258,9 +276,9 @@ async function moderationAction(
       `UPDATE maps SET status = ?, moderation_reason = ?,
                        archived_at_ms = CASE WHEN ? = 'archived' THEN ? ELSE NULL END,
                        unpublished_at_ms = CASE WHEN ? = 'archived' THEN COALESCE(unpublished_at_ms, ?) ELSE NULL END
-        WHERE id = ?`,
+        WHERE id = ? AND (? = 'archived' OR moderation_reason IS NOT NULL)`,
     ).bind(nextStatus, action === "takedown" ? body.reason.trim() : null,
-      nextStatus, nowMs, nextStatus, nowMs, mapId),
+      nextStatus, nowMs, nextStatus, nowMs, mapId, nextStatus),
     env.DB.prepare(
       `UPDATE map_versions SET status = ? WHERE map_id = ? AND revision = ?`,
     ).bind(versionStatus, mapId, map.current_revision),
@@ -277,6 +295,7 @@ async function moderationAction(
   if ((results[0]?.meta.changes ?? 0) !== 1) {
     throw new HttpError(409, "map_state_changed", "The map state changed before moderation completed.");
   }
+  purgeMapCache(ctx, config, mapId, [map.current_revision]);
   return jsonResponse({ requestId, mapId, status: nextStatus }, 200, requestId, {
     "Cache-Control": "no-store",
   });
@@ -286,22 +305,24 @@ export function takedownMap(
   request: Request,
   env: Env,
   config: RuntimeConfig,
+  ctx: ExecutionContext,
   principal: AuthPrincipal,
   mapId: string,
   requestId: string,
   nowMs: number,
 ): Promise<Response> {
-  return moderationAction(request, env, config, principal, mapId, "takedown", requestId, nowMs);
+  return moderationAction(request, env, config, ctx, principal, mapId, "takedown", requestId, nowMs);
 }
 
 export function restoreMap(
   request: Request,
   env: Env,
   config: RuntimeConfig,
+  ctx: ExecutionContext,
   principal: AuthPrincipal,
   mapId: string,
   requestId: string,
   nowMs: number,
 ): Promise<Response> {
-  return moderationAction(request, env, config, principal, mapId, "restore", requestId, nowMs);
+  return moderationAction(request, env, config, ctx, principal, mapId, "restore", requestId, nowMs);
 }

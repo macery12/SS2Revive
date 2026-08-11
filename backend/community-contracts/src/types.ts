@@ -11,6 +11,22 @@ export const MAX_TAGS = 32;
 export const MAX_METADATA_ITEM_CHARACTERS = 128;
 export const MAX_PAGE_SIZE = 50;
 
+/**
+ * Serialized UTF-8 ceiling for the free-form manifest metadata that the catalogue echoes back
+ * verbatim (tags, configurations, validations). The per-field count limits alone allow roughly
+ * 131,000 characters of objectives per manifest, which a publisher could use to push a handful of
+ * maps past the catalogue response budget and take the public listing offline for everyone. The
+ * per-map ceiling keeps that cost predictable; the listing endpoints additionally degrade rather
+ * than fail when the total budget is reached.
+ */
+export const MAX_STRUCTURED_METADATA_BYTES = 12 * 1024;
+
+/** Response budget for the paged map listing. */
+export const MAX_MAP_PAGE_BYTES = 1024 * 1024;
+
+/** Response budget for the compatibility catalogue document. */
+export const MAX_CATALOG_BYTES = 2 * 1024 * 1024;
+
 export interface ApiErrorBody {
   error: {
     code: string;

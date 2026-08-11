@@ -18,9 +18,9 @@
     "AUTH_AUDIENCE": "ss2revive-community-client",
     "MOCK_STEAM_ID64": "",
     "PUBLIC_ORIGIN": "https://community.m12labs.net",
-    "DOWNLOAD_DAILY_BYTES": "2147483648",
-    "DOWNLOAD_CONCURRENCY": "3",
     "UPLOAD_DAILY_LIMIT": "10",
+    "UPLOAD_DAILY_BYTES": "1073741824",
+    "RETAINED_BYTES_PER_ACCOUNT": "5368709120",
     "MAPS_PER_ACCOUNT_LIMIT": "25",
     "MAINTAINER_STEAM_IDS": "76561198145479980"
   },
@@ -78,6 +78,8 @@
   "triggers": {
     "crons": ["17 * * * *"]
   },
+  // Explicit CPU limits require a paid Workers plan; re-enable this block after upgrading.
+  // "limits": { "cpu_ms": 30000 },
   "observability": {
     "enabled": true,
     "head_sampling_rate": 0.1

@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using Data;
 using HarmonyLib;
 using Services;
@@ -11,27 +10,25 @@ namespace SS2Revive
 {
     /// <summary>
     /// Entry points that make local sharing and online publication reachable without leaving the
-    /// game. Folder import remains automatic; online publication uses a normal level action and a
-    /// full-size overlay rather than cloning the Create screen's oversized video button.
+    /// game. Folder import remains automatic; online publication replaces the game's obsolete
+    /// Publish action and opens a full-size overlay.
     ///
-    /// Export takes over the Share button rather than the Publish button, which is the opposite of
-    /// the obvious choice and the right one. The terminal already shows exactly one of the two at a
-    /// time - Publish while a level is a draft, Share once it is published:
+    /// Export takes over the Share button. The terminal normally shows Publish while a level is a
+    /// draft and Share once it is published:
     /// <code>
     ///   _publishButton.gameObject.SetActive(... &amp;&amp; _isInCreateMode &amp;&amp; flag);   // flag  = Draft
     ///   _shareButton.gameObject.SetActive(flag3);                            // flag3 = Published
     /// </code>
-    /// so the pair is already a two-stage flow, and Publish is not spare: publishing is what puts a
-    /// level into Discover and into the free-for-all pool. Share, on the other hand, handed out a
-    /// code for a level nobody else could obtain - the one button here that genuinely had nowhere
-    /// left to point.
+    /// SS2Revive keeps Export available for both states and makes Publish the authenticated online
+    /// action. This removes the duplicate Publish Online button while preserving the familiar
+    /// modal layout and navigation.
     ///
     /// Import is scanned silently whenever Create opens. The previous cloned training-video button
     /// was intentionally removed because its large tile was the wrong interaction for publication.
     /// </summary>
     internal static class SharingPatches
     {
-        private const string OnlinePublishButtonName = "SS2ReviveOnlinePublishButton";
+        private const string LogoutButtonName = "SS2ReviveCommunityLogoutButton";
 
         /// <summary>
         /// The Create screen currently open, so the Import button can redraw it. The button's
@@ -40,6 +37,8 @@ namespace SS2Revive
         /// </summary>
         private static TerminalCreateScreen _screen;
         private static TerminalLevelModalController _publishModal;
+        private static ExtendedButton _accountButton;
+        private static CommunityPublishOperation _accountOperation;
 
         internal static void Apply(Harmony harmony)
         {
@@ -65,6 +64,21 @@ namespace SS2Revive
                     AccessTools.Method(typeof(SharingPatches), nameof(DisplayLevelData_Postfix))));
             });
 
+            PatchSet.Try("TerminalCreateScreen.SetupNavigation -> community logout", () =>
+            {
+                var target = PatchSet.Method(typeof(TerminalCreateScreen), "SetupNavigation");
+                harmony.Patch(target, null, new HarmonyMethod(
+                    AccessTools.Method(typeof(SharingPatches), nameof(CreateNavigation_Postfix))));
+            });
+
+            PatchSet.Try("TerminalLevelModalController.OnPublishLevelClicked -> publish online", () =>
+            {
+                var target = PatchSet.Method(typeof(TerminalLevelModalController),
+                    "OnPublishLevelClicked", new[] { typeof(ExtendedButton) });
+                harmony.Patch(target, new HarmonyMethod(
+                    AccessTools.Method(typeof(SharingPatches), nameof(Publish_Prefix))));
+            });
+
             PatchSet.Try("TerminalUIController.DisableUI -> close community publish overlay", () =>
             {
                 var target = PatchSet.Method(typeof(TerminalUIController), "DisableUI");
@@ -74,16 +88,9 @@ namespace SS2Revive
         }
 
         /// <summary>
-        /// Shows the export button on a draft, which the original does not.
-        ///
-        /// Publishing is a local status change and always has been - it marks a level for Discover
-        /// and for the free-for-all queue on this machine, and nothing about it ever leaves the
-        /// computer now that there is no service to leave for. But the button that carries export
-        /// only appeared once a level was published, which made publishing feel like a prerequisite
-        /// for sharing, and a step that sounds irreversible is a bad thing to require.
-        ///
-        /// So a draft can be exported too. Publish goes back to being what it is: the way to get
-        /// your own level into your own Discover list and free-for-all rotation.
+        /// Shows Export on saved drafts as well as published levels, then turns the stock Publish
+        /// action into authenticated online publication. Neither operation depends on the retired
+        /// Bossa UGC service.
         /// </summary>
         private static void DisplayLevelData_Postfix(TerminalLevelModalController __instance)
         {
@@ -93,7 +100,8 @@ namespace SS2Revive
                 if (summary == null) return;
 
                 ConfigureInstalledActions(__instance, summary);
-                EnsureOnlinePublishButton(__instance, summary);
+                ConfigureOnlinePublishAction(__instance, summary);
+                RefreshStockActionLabelsNextFrame(__instance, summary.serverLevelId);
                 if (summary.LevelStatus != UGCApi.EStatus.Draft) return;
 
                 var inCreateMode = AccessTools
@@ -123,6 +131,22 @@ namespace SS2Revive
         private static LevelSummaryData CurrentLevel(TerminalLevelModalController modal) =>
             AccessTools.Field(typeof(TerminalLevelModalController), "_currentDisplayedLevel")
                 ?.GetValue(modal) as LevelSummaryData;
+
+        private static void RefreshStockActionLabelsNextFrame(
+            TerminalLevelModalController modal, string expectedLevelId)
+        {
+            Dispatcher.NextFrame(() =>
+            {
+                var current = modal == null ? null : CurrentLevel(modal);
+                if (current == null || current.serverLevelId != expectedLevelId) return;
+                var share = AccessTools.Field(typeof(TerminalLevelModalController), "_shareButton")
+                    ?.GetValue(modal) as ExtendedButton;
+                if (share != null && share.gameObject.activeSelf) SetLabel(share, "EXPORT");
+                var publish = AccessTools.Field(typeof(TerminalLevelModalController), "_publishButton")
+                    ?.GetValue(modal) as ExtendedButton;
+                if (publish != null && publish.gameObject.activeSelf) SetLabel(publish, "PUBLISH");
+            });
+        }
 
         private static void ConfigureInstalledActions(TerminalLevelModalController modal,
                                                       LevelSummaryData summary)
@@ -157,53 +181,18 @@ namespace SS2Revive
             }
         }
 
-        private static void TerminalDisabled_Prefix() => CommunityPublishOverlay.HideActive();
-
-        private static void EnsureOnlinePublishButton(TerminalLevelModalController modal,
-                                                      LevelSummaryData summary)
+        private static void TerminalDisabled_Prefix()
         {
-            var template = AccessTools.Field(typeof(TerminalLevelModalController), "_editButton")
+            CommunityPublishOverlay.HideActive();
+            _accountOperation?.Cancel();
+            _accountOperation = null;
+        }
+
+        private static void ConfigureOnlinePublishAction(TerminalLevelModalController modal,
+                                                         LevelSummaryData summary)
+        {
+            var button = AccessTools.Field(typeof(TerminalLevelModalController), "_publishButton")
                 ?.GetValue(modal) as ExtendedButton;
-            if (template == null || template.transform.parent == null) return;
-
-            var parent = template.transform.parent;
-            var existing = parent.Find(OnlinePublishButtonName);
-            ExtendedButton button;
-            if (existing == null)
-            {
-                var clone = UnityEngine.Object.Instantiate(template.gameObject, parent);
-                clone.name = OnlinePublishButtonName;
-                clone.transform.SetSiblingIndex(template.transform.GetSiblingIndex() + 1);
-                button = clone.GetComponent<ExtendedButton>();
-                if (button == null)
-                {
-                    UnityEngine.Object.Destroy(clone);
-                    return;
-                }
-                button.onClick = new Button.ButtonClickedEvent();
-                button.OnPointerClickButton = OnlinePublishClicked;
-                button.OnPointerEnterButton = null;
-                button.OnPointerExitButton = null;
-                StripLocalisation(clone);
-                SetLabel(button, "PUBLISH ONLINE");
-
-                var buttons = AccessTools.Field(typeof(TerminalLevelModalController), "_buttons")
-                    ?.GetValue(modal) as List<ExtendedButton>;
-                if (buttons != null && !buttons.Contains(button)) buttons.Add(button);
-
-                if (parent.GetComponent<LayoutGroup>() == null)
-                {
-                    var rect = clone.transform as RectTransform;
-                    var source = template.transform as RectTransform;
-                    if (rect != null && source != null)
-                        rect.anchoredPosition = source.anchoredPosition
-                                                + new Vector2(source.rect.width + 8f, 0f);
-                }
-            }
-            else
-            {
-                button = existing.GetComponent<ExtendedButton>();
-            }
             if (button == null) return;
 
             var inCreateMode = AccessTools.Field(typeof(TerminalLevelModalController), "_isInCreateMode")
@@ -213,21 +202,23 @@ namespace SS2Revive
             var visible = Plugin.LevelSharingEnabled.Value && inCreateMode && ownsLevel
                           && !UgcBackend.IsImported(summary.serverLevelId)
                           && !string.IsNullOrEmpty(summary.serverLevelId);
+            SetLabel(button, "PUBLISH");
             button.gameObject.SetActive(visible);
             button.interactable = visible;
             if (visible) _publishModal = modal;
         }
 
-        private static void OnlinePublishClicked(ExtendedButton ignored)
+        private static bool Publish_Prefix(TerminalLevelModalController __instance)
         {
-            var modal = _publishModal;
+            var modal = __instance ?? _publishModal;
             var summary = modal == null ? null : CurrentLevel(modal);
             if (modal == null || summary == null)
             {
                 TerminalMessage.Show("No saved level is selected for publication.", isWarning: true);
-                return;
+                return false;
             }
             CommunityPublishOverlay.Show(modal, summary);
+            return false;
         }
 
         // ------------------------------------------------------------------ export
@@ -271,8 +262,9 @@ namespace SS2Revive
                     Plugin.Log.LogWarning("Could not put the share code on the clipboard: " + ex.Message);
                 }
 
-                TerminalMessage.Show("Exported to the SS2Revive export folder. Code " + code
-                                     + " copied to your clipboard.");
+                OpenExportFolder();
+                TerminalMessage.Show("Exported to the SS2Revive export folder and opened it. Code "
+                                     + code + " copied to your clipboard.");
             }
             catch (Exception ex)
             {
@@ -290,6 +282,7 @@ namespace SS2Revive
             if (!isLocalPlayer) return;
 
             _screen = __instance;
+            ConfigureLogoutButton(__instance);
 
             try
             {
@@ -359,7 +352,133 @@ namespace SS2Revive
 
         internal static void RefreshCurrentCreateScreen()
         {
-            if (_screen != null) Refresh(_screen);
+            if (_screen == null) return;
+            Refresh(_screen);
+            ConfigureLogoutButton(_screen);
+        }
+
+        internal static void RefreshCommunitySessionButton()
+        {
+            Dispatcher.NextFrame(() =>
+            {
+                if (_screen != null) ConfigureLogoutButton(_screen);
+            });
+        }
+
+        private static void ConfigureLogoutButton(TerminalCreateScreen screen)
+        {
+            if (screen == null) return;
+            var existing = screen.transform.Find(LogoutButtonName);
+            var button = existing == null ? null : existing.GetComponent<ExtendedButton>();
+            if (button == null)
+            {
+                var template = AccessTools.Field(typeof(TerminalCreateScreen), "_loadNextPageBtn")
+                    ?.GetValue(screen) as ExtendedButton;
+                if (template == null) return;
+                var clone = UnityEngine.Object.Instantiate(template.gameObject, screen.transform);
+                clone.name = LogoutButtonName;
+                clone.transform.SetAsLastSibling();
+                button = clone.GetComponent<ExtendedButton>();
+                if (button == null)
+                {
+                    UnityEngine.Object.Destroy(clone);
+                    return;
+                }
+                StripLocalisation(clone);
+                var rect = clone.transform as RectTransform;
+                if (rect != null)
+                {
+                    rect.anchorMin = new Vector2(1f, 1f);
+                    rect.anchorMax = new Vector2(1f, 1f);
+                    rect.pivot = new Vector2(1f, 1f);
+                    rect.anchoredPosition = new Vector2(-34f, -34f);
+                    rect.sizeDelta = new Vector2(180f, 54f);
+                    rect.localScale = Vector3.one;
+                }
+                button.onClick = new Button.ButtonClickedEvent();
+                button.OnPointerClickButton = AccountClicked;
+                button.OnPointerEnterButton = null;
+                button.OnPointerExitButton = null;
+            }
+            _accountButton = button;
+            var signedIn = CommunityPublishClient.HasStoredSession;
+            SetLabel(button, signedIn ? "LOG OUT" : "LOG IN");
+            var visible = CommunityPublishClient.Enabled;
+            button.gameObject.SetActive(visible);
+            button.interactable = visible && _accountOperation == null;
+            CreateNavigation_Postfix(screen);
+        }
+
+        private static void CreateNavigation_Postfix(TerminalCreateScreen __instance)
+        {
+            var account = _accountButton;
+            if (__instance == null || account == null || !account.gameObject.activeSelf) return;
+            var training = AccessTools.Field(typeof(TerminalCreateScreen), "_trainingVideosButton")
+                ?.GetValue(__instance) as ExtendedButton;
+            if (training == null) return;
+            var trainingNavigation = training.navigation;
+            trainingNavigation.selectOnRight = account;
+            training.navigation = trainingNavigation;
+            account.navigation = new Navigation
+            {
+                mode = Navigation.Mode.Explicit,
+                selectOnLeft = training,
+                selectOnUp = training,
+            };
+        }
+
+        private static void AccountClicked(ExtendedButton ignored)
+        {
+            if (_accountOperation != null || _accountButton == null) return;
+            _accountButton.interactable = false;
+            if (CommunityPublishClient.HasStoredSession)
+            {
+                SetLabel(_accountButton, "SIGNING OUT");
+                _accountOperation = CommunityPublishClient.Logout(new CommunityAccountCallbacks
+                {
+                    Status = text => TerminalMessage.Show(text),
+                    Completed = () => FinishAccountAction(null,
+                        "Signed out of SS2Revive community publishing on this PC."),
+                    Failed = message => FinishAccountAction(message, null),
+                });
+                return;
+            }
+
+            SetLabel(_accountButton, "SIGNING IN");
+            _accountOperation = CommunityPublishClient.Login(new CommunityAccountCallbacks
+            {
+                Status = text => TerminalMessage.Show(text),
+                AuthenticationRequired = OpenAccountAuthentication,
+                Completed = () => FinishAccountAction(null,
+                    "Signed in to SS2Revive community publishing."),
+                Failed = message => FinishAccountAction(message, null),
+            });
+        }
+
+        private static void OpenAccountAuthentication(string code, Uri uri)
+        {
+            TerminalMessage.Show("Finish Steam sign-in in your browser. Code " + code + ".",
+                                 false, 12f);
+            try { Application.OpenURL(uri.AbsoluteUri); }
+            catch (Exception ex)
+            {
+                _accountOperation?.Cancel();
+                FinishAccountAction("Could not open Steam login: " + ex.Message, null);
+            }
+        }
+
+        private static void FinishAccountAction(string warning, string success)
+        {
+            _accountOperation = null;
+            if (_accountButton != null)
+            {
+                SetLabel(_accountButton,
+                    CommunityPublishClient.HasStoredSession ? "LOG OUT" : "LOG IN");
+                _accountButton.gameObject.SetActive(CommunityPublishClient.Enabled);
+                _accountButton.interactable = CommunityPublishClient.Enabled;
+            }
+            TerminalMessage.Show(string.IsNullOrEmpty(warning) ? success : warning,
+                                 !string.IsNullOrEmpty(warning));
         }
 
         private static void OpenImportFolder()
@@ -373,6 +492,20 @@ namespace SS2Revive
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning("Could not open the import folder: " + ex.Message);
+            }
+        }
+
+        private static void OpenExportFolder()
+        {
+            if (LevelSharing.ExportDirectory == null) return;
+
+            try
+            {
+                Application.OpenURL("file:///" + LevelSharing.ExportDirectory.Replace('\\', '/'));
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("Could not open the export folder: " + ex.Message);
             }
         }
 

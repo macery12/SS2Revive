@@ -1,6 +1,10 @@
 import { isSha256, MAX_BUNDLE_BYTES, MAX_IMAGE_BYTES } from "@ss2revive/community-contracts";
+import { cachedObjectBody } from "./edge-cache";
 import { emptyResponse, HttpError, responseHeaders } from "./http";
 import { downloadableVersion, type MapRow } from "./maps";
+
+/** Takedowns must reach shared caches promptly, so published objects cache only briefly. */
+const DOWNLOAD_CACHE_SECONDS = 300;
 
 interface ByteRange {
   offset: number;
@@ -68,6 +72,7 @@ function objectMetadata(row: MapRow, kind: "bundle" | "thumbnail"): {
 export async function downloadObject(
   request: Request,
   env: Env,
+  ctx: ExecutionContext,
   mapId: string,
   revision: number,
   kind: "bundle" | "thumbnail",
@@ -110,7 +115,10 @@ export async function downloadObject(
   const contentLength = range?.length ?? metadata.size;
   const headers = responseHeaders(requestId, {
     "Accept-Ranges": "bytes",
-    "Cache-Control": "public, max-age=31536000, immutable",
+    // The bytes at (mapId, revision) are immutable, but the *authorization* to serve them is not:
+    // a takedown or unpublish makes this route 404. A year-long immutable directive let shared
+    // caches keep serving removed content long after moderation acted, so keep the window short.
+    "Cache-Control": `public, max-age=${DOWNLOAD_CACHE_SECONDS}, stale-while-revalidate=60`,
     "Content-Length": String(contentLength),
     "Content-Type": metadata.contentType,
     ETag: etag,
@@ -122,9 +130,25 @@ export async function downloadObject(
   }
   if (request.method === "HEAD") return new Response(null, { status, headers });
 
+  // Whole-object reads share bytes across every caller, so they are served from the
+  // content-addressed body cache. The D1 authorization lookup above still runs on every request.
+  if (range === null) {
+    const body = await cachedObjectBody(ctx, metadata.sha256, async () => {
+      const object = await env.MAP_BUCKET.get(metadata.key);
+      if (object === null || object.size !== metadata.size || object.customMetadata?.sha256 !== metadata.sha256) {
+        throw new HttpError(503, "object_metadata_mismatch", "The stored object failed its metadata check.", { "Retry-After": "30" });
+      }
+      return object.body;
+    });
+    if (body === null) {
+      throw new HttpError(503, "object_metadata_mismatch", "The stored object failed its metadata check.", { "Retry-After": "30" });
+    }
+    return new Response(body, { status, headers });
+  }
+
   const object = await env.MAP_BUCKET.get(
     metadata.key,
-    range === null ? undefined : { range: { offset: range.offset, length: range.length } },
+    { range: { offset: range.offset, length: range.length } },
   );
   if (object === null || object.size !== metadata.size || object.customMetadata?.sha256 !== metadata.sha256) {
     throw new HttpError(503, "object_metadata_mismatch", "The stored object failed its metadata check.", { "Retry-After": "30" });

@@ -1,0 +1,136 @@
+name: CI
+
+# What this deliberately does not do is scan for committed secrets. That check has to happen before
+# the objects reach GitHub, or it is only a notification that the leak already shipped, so it lives
+# in .githooks/pre-push instead. Everything here is a check that is still worth running on code that
+# is already public.
+
+on:
+  push:
+    branches: ["**"]
+    # Tagged pushes are the release build's job; running both would duplicate the work.
+    tags-ignore: ["v*.*.*"]
+  pull_request:
+  # Advisories are published against dependencies that have not changed, so the audit needs a clock
+  # of its own rather than waiting for the next commit.
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  WRANGLER_SEND_METRICS: "false"
+
+jobs:
+  worker:
+    name: Worker types and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # There is no package.json at the repository root, so the version has to be pointed at the
+          # backend workspace explicitly instead of being discovered.
+          package_json_file: backend/package.json
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: backend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check generated bindings and types
+        # Regenerates worker-configuration.d.ts from wrangler.jsonc and fails if the committed copy
+        # has drifted, then type-checks against it. A binding added to the config but never wired up
+        # is caught here rather than at deploy time.
+        run: pnpm run check
+
+      - name: Run Worker tests
+        # Real Miniflare D1 and R2, including the migrations, so a migration that does not apply
+        # cleanly fails here instead of against production.
+        run: pnpm test
+
+      - name: Build Worker bundle
+        # A dry-run deploy. Proves the Worker still bundles without needing any Cloudflare
+        # credentials in CI.
+        run: pnpm run build
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: backend/package.json
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: backend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit dependencies
+        # Kept in its own job so a newly published advisory reports as an advisory, rather than
+        # turning up as a mystery failure in the middle of the test job.
+        run: pnpm run security:audit
+
+  data:
+    name: SS2Revive_Data tests
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Run data tests
+        # SS2Revive_Data references no game assembly, and the runner reports SKIP for the checks
+        # that need an installed copy of the game, so this is meaningful on a bare runner. The
+        # plugin itself is not built here: SS2Revive.csproj compiles against the game's Managed
+        # directory, which no hosted runner has.
+        shell: pwsh
+        run: |
+          dotnet run --project tests/DataTests/DataTests.csproj --configuration Release
+          if ($LASTEXITCODE -ne 0) { throw 'Data tests failed.' }

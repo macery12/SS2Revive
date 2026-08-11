@@ -86,6 +86,14 @@ export async function buildLocalFixture(options: {
   validations?: unknown[];
   contentVersion?: number;
   exportedAtMs?: number;
+  title?: string;
+  tags?: string[];
+  /** Test hook: container entries the real writer never emits, used to pin rejection behaviour. */
+  extraEntries?: ReadonlyArray<{ name: string; payload: Uint8Array }>;
+  /** Test hook: replaces the generated thumbnail payload verbatim. */
+  thumbnail?: Uint8Array;
+  /** Test hook: the server time the manifest is validated against. */
+  nowMs?: number;
 } = {}): Promise<{
   bytes: Uint8Array;
   thumbnail: Uint8Array;
@@ -95,12 +103,12 @@ export async function buildLocalFixture(options: {
   thumbnailSha256: string;
 }> {
   const content = fixtureLevelContent();
-  const thumbnail = fixtureThumbnail();
+  const thumbnail = options.thumbnail ?? fixtureThumbnail();
   const contentSha256 = await sha256Hex(content);
   const manifest = encoder.encode(JSON.stringify({
     bundleVersion: 2,
     id: FIXTURE_ID,
-    title: "Phase 0 Local Test Room",
+    title: options.title ?? "Phase 0 Local Test Room",
     description: "A deterministic local-only backend fixture.",
     createdAt: FIXTURE_CREATED_AT,
     exportedAt: options.exportedAtMs ?? FIXTURE_CREATED_AT + 1000,
@@ -109,7 +117,7 @@ export async function buildLocalFixture(options: {
     reviveVersion: "0.1.0",
     contentSha256,
     creators: ["STEAM-76561198145479980-------------"],
-    tags: ["TEAM_COOP", "LOCAL_TEST"],
+    tags: options.tags ?? ["TEAM_COOP", "LOCAL_TEST"],
     configurations: options.configurations ?? FIXTURE_CONFIGURATIONS,
     validations: options.validations ?? FIXTURE_VALIDATIONS,
   }));
@@ -118,9 +126,10 @@ export async function buildLocalFixture(options: {
   writeEntry(output, "asset.json", manifest);
   writeEntry(output, "level.bin", content);
   writeEntry(output, "thumb.png", thumbnail);
+  for (const entry of options.extraEntries ?? []) writeEntry(output, entry.name, entry.payload);
   writeUint16(output, 0);
   const bytes = new Uint8Array(output);
-  const inspected = await inspectLevelBundle(bytes, { nowMs: Date.UTC(2026, 7, 8) });
+  const inspected = await inspectLevelBundle(bytes, { nowMs: options.nowMs ?? Date.UTC(2026, 7, 8) });
   const thumbnailSha256 = await sha256Hex(thumbnail);
   return {
     bytes,

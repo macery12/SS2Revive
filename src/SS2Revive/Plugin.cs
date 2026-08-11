@@ -179,7 +179,7 @@ namespace SS2Revive
                 + "without this they stay white.");
             NewsFeedUrl = Config.Bind("NewsFeed", "Url", "",
                 "Where to fetch NewsFeed.json and images/ from. Leave empty to read them out of "
-                + "BepInEx/plugins/SS2Revive/newsfeed/, which needs no server. Set an http(s) URL "
+                + "BepInEx/plugins/SS2Revive/newsfeed/, which needs no server. Set an https:// URL "
                 + "with a trailing slash to serve the feed to several machines from one place.");
 
             SteamTransport = Config.Bind("Party", "SteamP2PTransport", true,

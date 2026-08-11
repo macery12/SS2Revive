@@ -388,7 +388,11 @@ namespace SS2ReviveData
             return TryVersion(value, out ignored);
         }
 
-        private static bool HasSafeNesting(string text)
+        /// <summary>
+        /// Bounds JSON nesting before a recursive-descent parse. Exposed so every untrusted-JSON
+        /// entry point can share one guard rather than each remembering to add its own.
+        /// </summary>
+        public static bool HasSafeNesting(string text)
         {
             var depth = 0;
             var inString = false;

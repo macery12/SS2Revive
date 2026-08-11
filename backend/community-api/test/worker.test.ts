@@ -6,8 +6,16 @@ import worker from "../src/worker";
 
 const ORIGIN = "http://127.0.0.1:8787";
 
+const testContext = {
+  waitUntil(promise: Promise<unknown>): void {
+    void promise.catch(() => undefined);
+  },
+  passThroughOnException(): void {},
+  props: {},
+} as unknown as ExecutionContext;
+
 async function fetchApi(path: string, init?: RequestInit): Promise<Response> {
-  return worker.fetch(new Request(`${ORIGIN}${path}`, init), env);
+  return worker.fetch(new Request(`${ORIGIN}${path}`, init), env, testContext);
 }
 
 async function json<T>(response: Response): Promise<T> {
@@ -45,9 +53,8 @@ beforeEach(async () => {
     env.DB.prepare("DELETE FROM moderation_events"),
     env.DB.prepare("DELETE FROM map_reports"),
     env.DB.prepare("DELETE FROM upload_usage_daily"),
+    env.DB.prepare("DELETE FROM account_storage"),
     env.DB.prepare("DELETE FROM map_uploads"),
-    env.DB.prepare("DELETE FROM download_leases"),
-    env.DB.prepare("DELETE FROM download_usage_daily"),
     env.DB.prepare("DELETE FROM steam_openid_sessions"),
     env.DB.prepare("DELETE FROM refresh_tokens"),
     env.DB.prepare("DELETE FROM refresh_token_families"),
@@ -267,28 +274,39 @@ describe("Phase 0 Worker", () => {
       PUBLIC_ORIGIN: "https://community.m12labs.net",
     };
     const activation = await worker.fetch(
-      new Request("https://community.m12labs.net/activate"), productionEnv,
+      new Request("https://community.m12labs.net/activate"), productionEnv, testContext,
     );
     expect(activation.status).toBe(200);
     expect(await activation.text()).toContain("Continue to Steam");
+    const invalidStart = await worker.fetch(new Request(
+      "https://community.m12labs.net/v1/auth/steam/start",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ user_code: "NOT-A-CODE" }),
+      },
+    ), productionEnv, testContext);
+    expect(invalidStart.status).toBe(400);
+    expect(invalidStart.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+    expect(await invalidStart.text()).toContain("We couldn't continue");
     const seeded = await worker.fetch(new Request("https://community.m12labs.net/_local/seed", {
       method: "POST", headers: { "X-Local-Setup-Secret": env.LOCAL_AUTH_SECRET },
-    }), productionEnv);
+    }), productionEnv, testContext);
     expect(seeded.status).toBe(404);
   });
 
   it("never exposes mock routes on a public origin even with local flags", async () => {
-    const activation = await worker.fetch(new Request("https://community.m12labs.net/activate"), env);
+    const activation = await worker.fetch(new Request("https://community.m12labs.net/activate"), env, testContext);
     expect(activation.status).toBe(421);
     const seeded = await worker.fetch(new Request("https://community.m12labs.net/_local/seed", {
       method: "POST", headers: { "X-Local-Setup-Secret": env.LOCAL_AUTH_SECRET },
-    }), env);
+    }), env, testContext);
     expect(seeded.status).toBe(421);
   });
 
   it("fails closed when security-sensitive environment values are invalid", async () => {
     const invalidEnv: Env = { ...env, LOCAL_AUTH_SECRET: "short" };
-    const response = await worker.fetch(new Request(`${ORIGIN}/health`), invalidEnv);
+    const response = await worker.fetch(new Request(`${ORIGIN}/health`), invalidEnv, testContext);
     expect(response.status).toBe(503);
     expect((await json<{ error: { code: string } }>(response)).error.code).toBe("temporarily_unavailable");
   });

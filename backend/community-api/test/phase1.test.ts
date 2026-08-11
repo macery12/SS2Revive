@@ -2,13 +2,13 @@ import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createDeviceSession, pollDeviceSession } from "../src/auth";
 import { runtimeConfig, type RuntimeConfig } from "../src/config";
-import { completeDownload, reserveDownload } from "../src/download-quota";
 import { HttpError } from "../src/http";
-import { cleanupExpiredState } from "../src/maintenance";
 import { enforceRateLimit } from "../src/rate-limit";
 import {
   confirmSteamLogin,
   startSteamLogin,
+  steamActivationPage,
+  steamAuthErrorPage,
   steamCallback,
   verifySteamOpenIdAssertion,
 } from "../src/steam-openid";
@@ -32,8 +32,6 @@ async function json<T>(response: Response): Promise<T> {
 async function clearDatabase(): Promise<void> {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM map_uploads"),
-    env.DB.prepare("DELETE FROM download_leases"),
-    env.DB.prepare("DELETE FROM download_usage_daily"),
     env.DB.prepare("DELETE FROM steam_openid_sessions"),
     env.DB.prepare("DELETE FROM refresh_tokens"),
     env.DB.prepare("DELETE FROM refresh_token_families"),
@@ -74,6 +72,40 @@ const validSteamFetcher = (async (input: RequestInfo | URL, init?: RequestInit):
 beforeEach(clearDatabase);
 
 describe("Phase 1 production authentication", () => {
+  it("prefills only a canonical device code and keeps the activation page script-free", async () => {
+    const requestId = crypto.randomUUID();
+    const activation = steamActivationPage(
+      new Request(`${PUBLIC_ORIGIN}/activate?user_code=abcd-efgh`), requestId,
+    );
+    const html = await activation.text();
+    expect(html).toContain('value="ABCD-EFGH"');
+    expect(html).toContain('autocomplete="one-time-code"');
+    expect(html).not.toContain("<script");
+    expect(activation.headers.get("Content-Security-Policy")).toMatch(
+      /style-src 'nonce-[A-Za-z0-9_-]{43}'/u,
+    );
+    expect(activation.headers.get("Content-Security-Policy")).not.toContain("unsafe-inline");
+
+    const invalid = steamActivationPage(
+      new Request(`${PUBLIC_ORIGIN}/activate?user_code=${encodeURIComponent('<script>')}`), requestId,
+    );
+    expect(await invalid.text()).toContain('name="user_code" value=""');
+  });
+
+  it("renders browser authentication failures as bounded HTML", async () => {
+    const requestId = crypto.randomUUID();
+    const response = steamAuthErrorPage(
+      new HttpError(400, "invalid_request", "The device code is invalid or expired."),
+      requestId,
+    );
+    expect(response.status).toBe(400);
+    expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+    const html = await response.text();
+    expect(html).toContain("We couldn't continue");
+    expect(html).toContain(requestId);
+    expect(html.length).toBeLessThan(20_000);
+  });
+
   it("verifies a Steam OpenID assertion through direct provider verification", async () => {
     const nowMs = Date.UTC(2026, 7, 8, 12, 0, 0);
     const returnTo = `${PUBLIC_ORIGIN}/v1/auth/steam/callback?state=test`;
@@ -169,55 +201,9 @@ describe("Phase 1 abuse controls", () => {
       .rejects.toMatchObject({ code: "rate_limited", status: 429 });
   });
 
-  it("enforces exact per-user concurrency and daily byte reservations", async () => {
-    const steamId64 = "76561198145479980";
-    const nowMs = Date.UTC(2026, 7, 8, 12, 0, 0);
-    await env.DB.prepare(
-      `INSERT INTO users (steam_id64, status, created_at, last_login_at) VALUES (?, 'active', ?, ?)`,
-    ).bind(steamId64, nowMs, nowMs).run();
-    const base = runtimeConfig(env);
-    const concurrencyConfig = { ...base, downloadDailyBytes: 10_000, downloadConcurrency: 2 };
-    const first = await reserveDownload(env, concurrencyConfig, steamId64, 100, nowMs);
-    const second = await reserveDownload(env, concurrencyConfig, steamId64, 100, nowMs);
-    await expect(reserveDownload(env, concurrencyConfig, steamId64, 100, nowMs))
-      .rejects.toMatchObject({ code: "download_concurrency_exceeded" });
-    await completeDownload(env, first);
-    await completeDownload(env, second);
-
-    const quotaConfig = { ...base, downloadDailyBytes: 1000, downloadConcurrency: 3 };
-    const third = await reserveDownload(env, quotaConfig, steamId64, 700, nowMs + 1);
-    await completeDownload(env, third);
-    await expect(reserveDownload(env, quotaConfig, steamId64, 200, nowMs + 2))
-      .rejects.toMatchObject({ code: "quota_exceeded" });
-  });
-
   it("uses typed HTTP errors for unavailable limiter bindings", async () => {
     await expect(enforceRateLimit(undefined, "actor-key"))
       .rejects.toBeInstanceOf(HttpError);
   });
 
-  it("cleans expired download leases and old usage counters", async () => {
-    const steamId64 = "76561198145479980";
-    const nowMs = Date.UTC(2026, 7, 8, 12, 0, 0);
-    await env.DB.prepare(
-      `INSERT INTO users (steam_id64, status, created_at, last_login_at) VALUES (?, 'active', ?, ?)`,
-    ).bind(steamId64, nowMs, nowMs).run();
-    await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO download_usage_daily
-           (steam_id64, day_utc, bytes_reserved, download_starts, updated_at)
-         VALUES (?, '2026-07-01', 100, 1, ?)`,
-      ).bind(steamId64, nowMs),
-      env.DB.prepare(
-        `INSERT INTO download_leases
-           (id, steam_id64, day_utc, bytes_reserved, created_at, expires_at)
-         VALUES (?, ?, '2026-08-08', 100, ?, ?)`,
-      ).bind(crypto.randomUUID(), steamId64, nowMs - 1000, nowMs - 1),
-    ]);
-
-    await cleanupExpiredState(env, nowMs);
-
-    expect(await env.DB.prepare("SELECT id FROM download_leases").first()).toBeNull();
-    expect(await env.DB.prepare("SELECT day_utc FROM download_usage_daily").first()).toBeNull();
-  });
 });

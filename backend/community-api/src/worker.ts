@@ -18,6 +18,7 @@ import {
 } from "./community-controls";
 import { opaqueHash } from "./crypto";
 import { downloadObject } from "./downloads";
+import { withEdgeCache } from "./edge-cache";
 import { errorResponse, HttpError, jsonResponse, requireMethod } from "./http";
 import { seedLocalFixture } from "./local-fixture";
 import { cleanupExpiredState } from "./maintenance";
@@ -27,6 +28,7 @@ import {
   confirmSteamLogin,
   startSteamLogin,
   steamActivationPage,
+  steamAuthErrorPage,
   steamCallback,
 } from "./steam-openid";
 import {
@@ -125,7 +127,12 @@ async function localSeed(
   return jsonResponse({ requestId, seeded: fixture }, 200, requestId);
 }
 
-async function route(request: Request, env: Env, requestId: string): Promise<Response> {
+async function route(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  requestId: string,
+): Promise<Response> {
   const config = runtimeConfig(env);
   requireCanonicalOrigin(request, config);
   const path = safePath(request);
@@ -226,7 +233,7 @@ async function route(request: Request, env: Env, requestId: string): Promise<Res
   if (path === "/v1/catalog") {
     requireMethod(request, "GET");
     await limitPublicRead(request, env, config, "catalog");
-    return catalogDocument(env, requestId, nowMs);
+    return withEdgeCache(request, ctx, () => catalogDocument(env, requestId, nowMs));
   }
 
   if (path === "/v1/maps") {
@@ -246,8 +253,8 @@ async function route(request: Request, env: Env, requestId: string): Promise<Res
     const principal = await authenticate(request, env, config, "maps:moderate", nowMs);
     await limitActor(env, config, "moderation-action", principal.steamId64);
     return moderationMatch[2] === "takedown"
-      ? takedownMap(request, env, config, principal, moderationMatch[1] ?? "", requestId, nowMs)
-      : restoreMap(request, env, config, principal, moderationMatch[1] ?? "", requestId, nowMs);
+      ? takedownMap(request, env, config, ctx, principal, moderationMatch[1] ?? "", requestId, nowMs)
+      : restoreMap(request, env, config, ctx, principal, moderationMatch[1] ?? "", requestId, nowMs);
   }
 
   const reportMatch = /^\/v1\/maps\/([^/]+)\/reports$/u.exec(path);
@@ -261,7 +268,7 @@ async function route(request: Request, env: Env, requestId: string): Promise<Res
   if (unpublishMatch !== null) {
     const principal = await authenticate(request, env, config, "maps:manage", nowMs);
     await limitActor(env, config, "map-unpublish", principal.steamId64);
-    return unpublishOwnMap(request, env, principal, unpublishMatch[1] ?? "", requestId, nowMs);
+    return unpublishOwnMap(request, env, config, ctx, principal, unpublishMatch[1] ?? "", requestId, nowMs);
   }
 
   const downloadMatch = /^\/v1\/maps\/([^/]+)\/versions\/([1-9][0-9]*)\/(download|thumbnail)$/u.exec(path);
@@ -275,6 +282,7 @@ async function route(request: Request, env: Env, requestId: string): Promise<Res
     return downloadObject(
       request,
       env,
+      ctx,
       mapId,
       revision,
       downloadMatch[3] === "download" ? "bundle" : "thumbnail",
@@ -294,7 +302,7 @@ async function route(request: Request, env: Env, requestId: string): Promise<Res
     if (request.method === "DELETE") {
       const principal = await authenticate(request, env, config, "maps:manage", nowMs);
       await limitActor(env, config, "map-archive", principal.steamId64);
-      return archiveOwnMap(request, env, principal, detailMatch[1] ?? "", requestId, nowMs);
+      return archiveOwnMap(request, env, config, ctx, principal, detailMatch[1] ?? "", requestId, nowMs);
     }
     requireMethod(request, "GET");
     await limitPublicRead(request, env, config, "maps");
@@ -305,14 +313,23 @@ async function route(request: Request, env: Env, requestId: string): Promise<Res
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const requestId = crypto.randomUUID();
     const startedAt = Date.now();
     let response: Response;
     try {
-      response = await route(request, env, requestId);
+      response = await route(request, env, ctx, requestId);
     } catch (error) {
-      if (error instanceof HttpError) response = errorResponse(error, requestId);
+      if (error instanceof HttpError) {
+        const pathname = new URL(request.url).pathname;
+        const browserAuthRoute = pathname === "/activate"
+          || pathname === "/v1/auth/steam/start"
+          || pathname === "/v1/auth/steam/callback"
+          || pathname === "/v1/auth/steam/confirm";
+        response = browserAuthRoute
+          ? steamAuthErrorPage(error, requestId)
+          : errorResponse(error, requestId);
+      }
       else {
         console.error(JSON.stringify({ event: "unhandled_error", requestId, name: error instanceof Error ? error.name : "unknown" }));
         response = errorResponse(new HttpError(500, "internal_error", "The request could not be completed."), requestId);

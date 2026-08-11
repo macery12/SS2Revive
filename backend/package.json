@@ -9,6 +9,7 @@
     "test:coverage": "pnpm --filter @ss2revive/community-api test:coverage",
     "security:secrets": "node scripts/secret-scan.mjs",
     "security:audit": "pnpm audit --audit-level high",
+    "security:hooks": "git config --local core.hooksPath .githooks",
     "security": "pnpm run security:secrets && pnpm run security:audit"
   }
 }

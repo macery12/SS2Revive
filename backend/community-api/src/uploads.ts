@@ -7,6 +7,7 @@ import {
   isSemanticVersion,
   isSha256,
   MAX_BUNDLE_BYTES,
+  MAX_TITLE_CHARACTERS,
   sha256Hex,
   type AuthPrincipal,
   type InspectedLevelBundle,
@@ -18,6 +19,10 @@ import { emptyResponse, HttpError, jsonResponse, readJsonObject, requireMethod }
 const RESERVATION_LIFETIME_MS = 30 * 60 * 1000;
 const MAX_ACTIVE_UPLOADS = 3;
 const MINIMUM_REVIVE_VERSION = "1.1.0";
+/** Current revision plus the two before it stay downloadable; older approved objects are released. */
+const RETAINED_REVISIONS = 3;
+/** How long a claimed validation lease stays valid before maintenance may reclaim it. */
+const VALIDATION_LEASE_TTL_MS = 10 * 60 * 1000;
 
 export interface UploadQueueMessage {
   kind: "map-upload";
@@ -386,6 +391,117 @@ async function isIdempotentRevision(
   return sameLogicalRevision(approved, incoming);
 }
 
+/**
+ * Charge an accepted revision against the account's daily byte allowance and its total retained
+ * footprint. The lifetime map-count quota only gates new map identifiers, so without these an
+ * account could republish revisions of one map and consume storage without bound.
+ */
+async function reserveStorageQuota(
+  env: Env,
+  config: RuntimeConfig,
+  steamId64: string,
+  bytes: number,
+  nowMs: number,
+): Promise<void> {
+  const dayUtc = new Date(nowMs).toISOString().slice(0, 10);
+  const daily = await env.DB.prepare(
+    `UPDATE upload_usage_daily SET bytes_published = bytes_published + ?, updated_at = ?
+      WHERE steam_id64 = ? AND day_utc = ? AND bytes_published + ? <= ?
+      RETURNING bytes_published`,
+  ).bind(bytes, nowMs, steamId64, dayUtc, bytes, config.uploadDailyBytes).first<{ bytes_published: number }>();
+  if (daily === null) {
+    throw new UploadRejected(
+      "daily_upload_bytes_reached",
+      "This Steam account has published its daily storage allowance. Try again tomorrow.",
+    );
+  }
+  const retained = await env.DB.prepare(
+    `INSERT INTO account_storage (steam_id64, retained_bytes, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(steam_id64) DO UPDATE SET
+       retained_bytes = account_storage.retained_bytes + excluded.retained_bytes,
+       updated_at = excluded.updated_at
+     WHERE account_storage.retained_bytes + excluded.retained_bytes <= ?
+     RETURNING retained_bytes`,
+  ).bind(steamId64, bytes, nowMs, config.retainedBytesPerAccount).first<{ retained_bytes: number }>();
+  if (retained === null) {
+    await env.DB.prepare(
+      `UPDATE upload_usage_daily SET bytes_published = MAX(0, bytes_published - ?), updated_at = ?
+        WHERE steam_id64 = ? AND day_utc = ?`,
+    ).bind(bytes, nowMs, steamId64, dayUtc).run();
+    throw new UploadRejected(
+      "storage_quota_reached",
+      "This Steam account has reached its retained storage limit. Delete an old map to publish more.",
+    );
+  }
+}
+
+/** Return released bytes to the account's retained footprint after revisions are collected. */
+async function releaseStorageQuota(
+  env: Env,
+  steamId64: string | null,
+  bytes: number,
+  nowMs: number,
+): Promise<void> {
+  if (steamId64 === null || bytes <= 0) return;
+  await env.DB.prepare(
+    `UPDATE account_storage SET retained_bytes = MAX(0, retained_bytes - ?), updated_at = ?
+      WHERE steam_id64 = ?`,
+  ).bind(bytes, nowMs, steamId64).run();
+}
+
+/**
+ * Approved bundles and thumbnails used to be retained for every revision ever published, so a
+ * single account could grow R2 without bound by republishing the same map. Keep the current
+ * revision plus a short rollback window and release the rest.
+ *
+ * D1 rows are removed before their objects: an unreferenced object is collected by the scheduled
+ * reconciler, whereas a row pointing at a deleted object would break downloads.
+ */
+async function retireSupersededRevisions(
+  env: Env,
+  mapId: string,
+  currentRevision: number,
+  ownerSteamId64: string,
+  nowMs: number,
+): Promise<void> {
+  const oldestRetained = currentRevision - (RETAINED_REVISIONS - 1);
+  if (oldestRetained < 2) return;
+  const stale = await env.DB.prepare(
+    `SELECT revision, bundle_key, thumbnail_key, size_bytes, thumbnail_size_bytes
+       FROM map_versions
+      WHERE map_id = ? AND revision < ? ORDER BY revision ASC LIMIT 100`,
+  ).bind(mapId, oldestRetained).all<{
+    revision: number;
+    bundle_key: string;
+    thumbnail_key: string | null;
+    size_bytes: number;
+    thumbnail_size_bytes: number | null;
+  }>();
+  if (stale.results.length === 0) return;
+
+  const statements: D1PreparedStatement[] = [];
+  const keys: string[] = [];
+  let released = 0;
+  for (const version of stale.results) {
+    statements.push(env.DB.prepare(
+      `DELETE FROM map_tags WHERE map_id = ? AND revision = ?`,
+    ).bind(mapId, version.revision));
+    statements.push(env.DB.prepare(
+      `DELETE FROM map_versions WHERE map_id = ? AND revision = ? AND revision < ?`,
+    ).bind(mapId, version.revision, currentRevision));
+    keys.push(version.bundle_key);
+    released += version.size_bytes;
+    if (version.thumbnail_key !== null) {
+      keys.push(version.thumbnail_key);
+      released += version.thumbnail_size_bytes ?? 0;
+    }
+  }
+  await env.DB.batch(statements);
+  await env.MAP_BUCKET.delete(keys);
+  await releaseStorageQuota(env, ownerSteamId64, released, nowMs);
+}
+
 async function rejectUpload(env: Env, row: UploadRow, code: string, message: string, nowMs: number): Promise<void> {
   await env.MAP_BUCKET.delete(row.quarantine_key);
   await env.DB.prepare(
@@ -427,6 +543,9 @@ async function publishValidatedUpload(
   }
 
   const revision = inspected.manifest.contentVersion;
+  // updated_at_ms is the default catalogue sort key and comes from a publisher-declared timestamp.
+  // Clamp it to server time so a manifest cannot rank itself above every legitimate map.
+  const publishedAtMs = Math.min(inspected.manifest.exportedAt, nowMs);
   const existing = await env.DB.prepare(
     `SELECT m.current_revision, m.owner_steam_id64, m.status, m.moderation_reason,
             v.creator_ids_json, v.sha256, v.bundle_key
@@ -447,21 +566,34 @@ async function publishValidatedUpload(
     if (revision <= existing.current_revision) {
       if (revision === existing.current_revision &&
           await isIdempotentRevision(env, existing, inspected, nowMs)) {
+        // The moderation check above is a read; a maintainer can take the map down between that
+        // read and this write. Re-assert it as a compare-and-swap so a takedown always wins, and
+        // never clear moderation_reason as a side effect of an ordinary publication.
         const results = await env.DB.batch([
           env.DB.prepare(
             `UPDATE maps SET status = 'published', owner_steam_id64 = COALESCE(owner_steam_id64, ?),
                              unpublished_at_ms = NULL, archived_at_ms = NULL,
-                             moderation_reason = NULL, updated_at_ms = MAX(updated_at_ms, ?)
-              WHERE id = ? AND (owner_steam_id64 = ? OR owner_steam_id64 IS NULL)`,
-          ).bind(row.steam_id64, inspected.manifest.exportedAt, inspected.manifest.id, row.steam_id64),
+                             updated_at_ms = MAX(updated_at_ms, ?)
+              WHERE id = ? AND (owner_steam_id64 = ? OR owner_steam_id64 IS NULL)
+                AND moderation_reason IS NULL`,
+          ).bind(row.steam_id64, publishedAtMs, inspected.manifest.id, row.steam_id64),
           env.DB.prepare(
-            `UPDATE map_versions SET status = 'published' WHERE map_id = ? AND revision = ?`,
+            `UPDATE map_versions SET status = 'published'
+              WHERE map_id = ? AND revision = ?
+                AND EXISTS (SELECT 1 FROM maps m WHERE m.id = map_versions.map_id
+                             AND m.moderation_reason IS NULL)`,
           ).bind(inspected.manifest.id, revision),
           env.DB.prepare(
             `UPDATE map_uploads SET status = 'published', map_id = ?, revision = ?, completed_at = ?
               WHERE id = ? AND status = 'validating' AND validation_lease = ?`,
           ).bind(inspected.manifest.id, revision, nowMs, row.id, validationLease),
         ]);
+        if ((results[0]?.meta.changes ?? 0) !== 1) {
+          throw new UploadRejected(
+            "map_under_moderation",
+            "This map was removed by a maintainer and cannot be republished until it is restored.",
+          );
+        }
         if ((results.at(-1)?.meta.changes ?? 0) !== 1) {
           throw new Error("idempotent publication state did not advance");
         }
@@ -482,6 +614,9 @@ async function publishValidatedUpload(
       throw new UploadRejected("map_quota_reached", "This Steam account has reached its map limit.");
     }
   }
+
+  const thumbnailBytes = inspected.thumbnail?.length ?? 0;
+  await reserveStorageQuota(env, config, row.steam_id64, bytes.length + thumbnailBytes, nowMs);
 
   const bundleKey = `approved/maps/${inspected.manifest.id}/r${revision}/${inspected.bundleSha256}.ss2level`;
   const bundleObject = await env.MAP_BUCKET.put(bundleKey, bytes, {
@@ -529,6 +664,13 @@ async function publishValidatedUpload(
   }
 
   const manifest = inspected.manifest;
+  // Lowercasing can lengthen a string (U+0130 becomes two code units under en-US), and the
+  // title_asc cursor rejects any sort value longer than a title. Refuse the map rather than
+  // issue a pagination cursor the listing will later reject.
+  const titleSort = manifest.title.toLocaleLowerCase("en-US");
+  if (titleSort.length > MAX_TITLE_CHARACTERS) {
+    throw new UploadRejected("title_invalid", "The level title cannot be sorted within its length limit.");
+  }
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
       `INSERT INTO maps
@@ -542,17 +684,18 @@ async function publishValidatedUpload(
          title = excluded.title, title_sort = excluded.title_sort,
          description = excluded.description, updated_at_ms = excluded.updated_at_ms
          , owner_steam_id64 = COALESCE(maps.owner_steam_id64, excluded.owner_steam_id64)
-         , unpublished_at_ms = NULL, archived_at_ms = NULL, moderation_reason = NULL
+         , unpublished_at_ms = NULL, archived_at_ms = NULL
        WHERE maps.current_revision < excluded.current_revision
-         AND (maps.owner_steam_id64 = excluded.owner_steam_id64 OR maps.owner_steam_id64 IS NULL)`,
+         AND (maps.owner_steam_id64 = excluded.owner_steam_id64 OR maps.owner_steam_id64 IS NULL)
+         AND maps.moderation_reason IS NULL`,
     ).bind(
       manifest.id,
       revision,
       manifest.title,
-      manifest.title.toLocaleLowerCase("en-US"),
+      titleSort,
       manifest.description,
       manifest.createdAt,
-      manifest.exportedAt,
+      publishedAtMs,
       row.steam_id64,
       manifest.id,
       row.steam_id64,
@@ -583,7 +726,7 @@ async function publishValidatedUpload(
       thumbnailSize,
       thumbnailSha256,
       thumbnailKey,
-      manifest.exportedAt,
+      publishedAtMs,
     ),
   ];
   for (const tag of manifest.tags) {
@@ -607,11 +750,25 @@ async function publishValidatedUpload(
   try {
     const results = await env.DB.batch(statements);
     if ((results.at(-1)?.meta.changes ?? 0) !== 1) {
+      // The maps upsert is now guarded on moderation_reason IS NULL, so a takedown that landed
+      // during validation blocks promotion here. That is a terminal outcome for this upload, not a
+      // transient fault: report it as a rejection so the queue stops retrying into the dead letter.
+      const blocked = await env.DB.prepare(
+        `SELECT moderation_reason FROM maps WHERE id = ? AND moderation_reason IS NOT NULL`,
+      ).bind(manifest.id).first<{ moderation_reason: string }>();
+      if (blocked !== null) {
+        throw new UploadRejected(
+          "map_under_moderation",
+          "This map was removed by a maintainer and cannot be republished until it is restored.",
+        );
+      }
       throw new Error("publication state did not advance");
     }
   } catch (error) {
     // Approved keys are immutable and content-addressed. Leaving an unreferenced object for
-    // later garbage collection is safer than deleting an object another idempotent attempt won.
+    // later garbage collection is safer than deleting an object another idempotent attempt won;
+    // the scheduled reconciler removes anything D1 does not reference.
+    if (error instanceof UploadRejected) throw error;
     if (existing === null) {
       const [map, owned] = await Promise.all([
         env.DB.prepare(`SELECT id FROM maps WHERE id = ?`).bind(manifest.id).first<{ id: string }>(),
@@ -625,6 +782,7 @@ async function publishValidatedUpload(
     throw error;
   }
   await env.MAP_BUCKET.delete(row.quarantine_key);
+  await retireSupersededRevisions(env, manifest.id, revision, row.steam_id64, nowMs);
 }
 
 export async function validateUploadMessage(env: Env, value: unknown, nowMs = Date.now()): Promise<void> {
@@ -645,9 +803,10 @@ export async function validateUploadMessage(env: Env, value: unknown, nowMs = Da
   const validationLease = crypto.randomUUID();
   const claimed = await env.DB.prepare(
     `UPDATE map_uploads
-        SET status = 'validating', validation_lease = ?, validation_started_at = ?
+        SET status = 'validating', validation_lease = ?, validation_started_at = ?,
+            validation_lease_expires_at = ?
       WHERE id = ? AND status = 'uploaded'`,
-  ).bind(validationLease, nowMs, row.id).run();
+  ).bind(validationLease, nowMs, nowMs + VALIDATION_LEASE_TTL_MS, row.id).run();
   if ((claimed.meta.changes ?? 0) !== 1) return;
   row.status = "validating";
   try {
@@ -663,7 +822,8 @@ export async function validateUploadMessage(env: Env, value: unknown, nowMs = Da
     }
     await env.DB.prepare(
       `UPDATE map_uploads
-          SET status = 'uploaded', validation_lease = NULL, validation_started_at = NULL
+          SET status = 'uploaded', validation_lease = NULL, validation_started_at = NULL,
+              validation_lease_expires_at = NULL
         WHERE id = ? AND status = 'validating' AND validation_lease = ?`,
     ).bind(row.id, validationLease).run();
     throw error;

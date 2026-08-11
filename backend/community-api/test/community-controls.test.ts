@@ -32,12 +32,11 @@ async function clearState(): Promise<void> {
     env.DB.prepare("DELETE FROM moderation_events"),
     env.DB.prepare("DELETE FROM map_reports"),
     env.DB.prepare("DELETE FROM upload_usage_daily"),
+    env.DB.prepare("DELETE FROM account_storage"),
     env.DB.prepare("DELETE FROM map_uploads"),
     env.DB.prepare("DELETE FROM map_tags"),
     env.DB.prepare("DELETE FROM map_versions"),
     env.DB.prepare("DELETE FROM maps"),
-    env.DB.prepare("DELETE FROM download_leases"),
-    env.DB.prepare("DELETE FROM download_usage_daily"),
     env.DB.prepare("DELETE FROM steam_openid_sessions"),
     env.DB.prepare("DELETE FROM refresh_tokens"),
     env.DB.prepare("DELETE FROM refresh_token_families"),
@@ -51,6 +50,14 @@ async function clearState(): Promise<void> {
   ).bind(REPORTER, Date.UTC(2026, 7, 8), Date.UTC(2026, 7, 8)).run();
 }
 
+const testContext = {
+  waitUntil(promise: Promise<unknown>): void {
+    void promise.catch(() => undefined);
+  },
+  passThroughOnException(): void {},
+  props: {},
+} as unknown as ExecutionContext;
+
 beforeEach(clearState);
 
 describe("community ownership and moderation controls", () => {
@@ -59,7 +66,7 @@ describe("community ownership and moderation controls", () => {
     const unpublished = await unpublishOwnMap(
       new Request(`${ORIGIN}/v1/maps/${MAP_ID}/unpublish`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-      }), env, ownerPrincipal, MAP_ID, crypto.randomUUID(), nowMs,
+      }), env, runtimeConfig(env), testContext, ownerPrincipal, MAP_ID, crypto.randomUUID(), nowMs,
     );
     expect(unpublished.status).toBe(200);
     expect(await env.DB.prepare("SELECT status FROM maps WHERE id = ?").bind(MAP_ID).first())
@@ -67,7 +74,7 @@ describe("community ownership and moderation controls", () => {
 
     const archived = await archiveOwnMap(
       new Request(`${ORIGIN}/v1/maps/${MAP_ID}`, { method: "DELETE" }),
-      env, ownerPrincipal, MAP_ID, crypto.randomUUID(), nowMs + 1,
+      env, runtimeConfig(env), testContext, ownerPrincipal, MAP_ID, crypto.randomUUID(), nowMs + 1,
     );
     expect(archived.status).toBe(204);
     expect(await env.DB.prepare("SELECT status FROM maps WHERE id = ?").bind(MAP_ID).first())
@@ -108,7 +115,7 @@ describe("community ownership and moderation controls", () => {
     const takedown = await takedownMap(new Request(`${ORIGIN}/v1/moderation/maps/${MAP_ID}/takedown`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reason: "Confirmed broken" }),
-    }), env, config, ownerPrincipal, MAP_ID, crypto.randomUUID(), nowMs + 1);
+    }), env, config, testContext, ownerPrincipal, MAP_ID, crypto.randomUUID(), nowMs + 1);
     expect(takedown.status).toBe(200);
     expect(await env.DB.prepare("SELECT status FROM maps WHERE id = ?").bind(MAP_ID).first())
       .toMatchObject({ status: "archived" });
@@ -118,7 +125,7 @@ describe("community ownership and moderation controls", () => {
     const restored = await restoreMap(new Request(`${ORIGIN}/v1/moderation/maps/${MAP_ID}/restore`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reason: "Issue corrected" }),
-    }), env, config, ownerPrincipal, MAP_ID, crypto.randomUUID(), nowMs + 2);
+    }), env, config, testContext, ownerPrincipal, MAP_ID, crypto.randomUUID(), nowMs + 2);
     expect(restored.status).toBe(200);
     expect(await env.DB.prepare("SELECT status FROM maps WHERE id = ?").bind(MAP_ID).first())
       .toMatchObject({ status: "published" });

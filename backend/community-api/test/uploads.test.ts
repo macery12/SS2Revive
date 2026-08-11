@@ -24,6 +24,7 @@ async function clearState(): Promise<void> {
     env.DB.prepare("DELETE FROM moderation_events"),
     env.DB.prepare("DELETE FROM map_reports"),
     env.DB.prepare("DELETE FROM upload_usage_daily"),
+    env.DB.prepare("DELETE FROM account_storage"),
     env.DB.prepare("DELETE FROM map_uploads"),
     env.DB.prepare("DELETE FROM map_tags"),
     env.DB.prepare("DELETE FROM map_versions"),
@@ -33,8 +34,6 @@ async function clearState(): Promise<void> {
     env.DB.prepare("DELETE FROM auth_sessions"),
     env.DB.prepare("DELETE FROM device_auth_sessions"),
     env.DB.prepare("DELETE FROM steam_openid_sessions"),
-    env.DB.prepare("DELETE FROM download_leases"),
-    env.DB.prepare("DELETE FROM download_usage_daily"),
     env.DB.prepare("DELETE FROM users"),
   ]);
   const objects = await env.MAP_BUCKET.list({ limit: 1000 });

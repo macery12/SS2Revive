@@ -81,8 +81,12 @@ namespace SS2Revive
         private const int RequestTimeoutMs = 20000;
         private const int UploadTimeoutMs = 120000;
         private static readonly object AuthGate = new object();
-        private static readonly byte[] TokenEntropy =
-            Encoding.UTF8.GetBytes("SS2Revive|community.m12labs.net|v1");
+        // DPAPI entropy, the on-disk file name, and a field inside the blob are all derived from
+        // the configured origin. A refresh token minted by one server can therefore never be
+        // replayed to another: repointing ApiCatalogUrl at a different host no longer hands that
+        // host a working credential for the original one.
+        private const string TokenEntropyPrefix = "SS2Revive|community-session|v2|";
+        private const char SessionFieldSeparator = '|';
 
         private static Uri _origin;
         private static Uri _apiBase;
@@ -93,6 +97,25 @@ namespace SS2Revive
         private static DateTime _accessExpiresUtc = DateTime.MinValue;
 
         internal static bool Enabled => _origin != null && _apiBase != null;
+
+        /// <summary>
+        /// A fast UI hint only. The server remains authoritative and the encrypted token is still
+        /// decrypted and validated under <see cref="AuthGate"/> before it can be used.
+        /// </summary>
+        internal static bool HasStoredSession
+        {
+            get
+            {
+                try
+                {
+                    if (!Enabled) return false;
+                    if (Volatile.Read(ref _tokenLoaded))
+                        return !string.IsNullOrEmpty(Volatile.Read(ref _refreshToken));
+                    return !string.IsNullOrEmpty(_tokenPath) && File.Exists(_tokenPath);
+                }
+                catch { return false; }
+            }
+        }
 
         internal static void Initialise(string saveRoot, string configuredCatalogUrl)
         {
@@ -110,7 +133,8 @@ namespace SS2Revive
                 || !string.IsNullOrEmpty(catalog.Query) || !string.IsNullOrEmpty(catalog.Fragment)) return;
             _origin = new Uri(catalog.GetLeftPart(UriPartial.Authority) + "/", UriKind.Absolute);
             _apiBase = new Uri(catalog, ".");
-            _tokenPath = Path.Combine(saveRoot, "auth", "community-session.v1");
+            _tokenPath = Path.Combine(saveRoot, "auth",
+                "community-session." + OriginFingerprint(_origin) + ".v2");
         }
 
         internal static CommunityPublishOperation Publish(LevelSharing.UploadPackage package,
@@ -190,6 +214,89 @@ namespace SS2Revive
         {
             return MapAction("DELETE", mapId, string.Empty, null, 204, true,
                              "Archiving this community map...", callbacks);
+        }
+
+        internal static CommunityPublishOperation Login(CommunityAccountCallbacks callbacks)
+        {
+            var operation = new CommunityPublishOperation();
+            var expectedSteamId64 = SteamIdentity.GetSteamId64().ToString();
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    if (!Enabled) throw new InvalidOperationException("The community API is disabled.");
+                    if (expectedSteamId64 == "0")
+                        throw new InvalidOperationException("Steam must be online before signing in.");
+                    Post(callbacks?.Status, "Starting protected Steam community sign-in...");
+                    EnsureAccessToken(operation, callbacks?.AuthenticationRequired, expectedSteamId64);
+                    operation.CancelIfRequested();
+                    Post(callbacks?.Completed);
+                }
+                catch (OperationCanceledException)
+                {
+                    Post(callbacks?.Status, "Steam community sign-in cancelled.");
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning("Community login failed: " + ex.Message);
+                    Post(callbacks?.Failed, SafeMessage(ex));
+                }
+            });
+            return operation;
+        }
+
+        internal static CommunityPublishOperation Logout(CommunityAccountCallbacks callbacks)
+        {
+            var operation = new CommunityPublishOperation();
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    if (!Enabled) throw new InvalidOperationException("The community API is disabled.");
+                    lock (AuthGate)
+                    {
+                        operation.CancelIfRequested();
+                        LoadRefreshToken();
+                        var token = _refreshToken;
+                        if (string.IsNullOrEmpty(token))
+                        {
+                            DeleteRefreshToken();
+                        }
+                        else
+                        {
+                            try
+                            {
+                                Post(callbacks?.Status, "Ending the protected Steam community session...");
+                                var response = SendJson("POST", new Uri(_apiBase, "auth/logout"),
+                                    Json.Object().Add("refreshToken", token).ToString(), null,
+                                    operation, RequestTimeoutMs);
+                                RequireStatus(response, 204);
+                            }
+                            finally
+                            {
+                                // User intent wins even when the network is unavailable. The
+                                // server token may expire later, but this PC must stop using it now.
+                                DeleteRefreshToken();
+                            }
+                        }
+                    }
+                    Post(callbacks?.Completed);
+                }
+                catch (OperationCanceledException)
+                {
+                    lock (AuthGate) DeleteRefreshToken();
+                }
+                catch (Exception ex)
+                {
+                    lock (AuthGate) DeleteRefreshToken();
+                    Plugin.Log.LogWarning("Community logout could not revoke the server session: "
+                                          + ex.Message);
+                    Post(callbacks?.Failed,
+                         "Signed out on this PC, but the server could not be reached to revoke the session."
+                         + " The unused server token will expire automatically.");
+                }
+            });
+            return operation;
         }
 
         internal static CommunityPublishOperation Report(string mapId, string reason,
@@ -353,6 +460,7 @@ namespace SS2Revive
             _accessExpiresUtc = DateTime.UtcNow.AddSeconds(expires);
             _refreshToken = refresh;
             SaveRefreshToken();
+            SharingPatches.RefreshCommunitySessionButton();
         }
 
         private static void PollPublication(Uri statusUri, string uploadId, string accessToken,
@@ -507,7 +615,7 @@ namespace SS2Revive
 
         private static Json ParseObject(ApiResponse response)
         {
-            var parsed = Json.TryParse(response.Body ?? string.Empty);
+            var parsed = SafeParse(response.Body);
             if (parsed == null || parsed.Kind != JsonKind.Object)
                 throw new InvalidDataException("The server returned invalid JSON.");
             return parsed;
@@ -518,7 +626,7 @@ namespace SS2Revive
             if (response.Status == expected) return;
             var code = "http_" + response.Status;
             var message = "The community server returned HTTP " + response.Status + ".";
-            var parsed = Json.TryParse(response.Body ?? string.Empty);
+            var parsed = SafeParse(response.Body);
             if (parsed != null)
             {
                 var error = parsed["error"];
@@ -560,6 +668,34 @@ namespace SS2Revive
                    && value.IndexOf('\\') < 0 && value.IndexOf("//", StringComparison.Ordinal) < 0;
         }
 
+        /// <summary>
+        /// Json.Parse is recursive descent and Json.TryParse catches only FormatException, so a
+        /// deeply nested body from a hostile or compromised server would overflow the stack and
+        /// kill the process. Bound the nesting first, as the catalogue and bundle readers do.
+        /// </summary>
+        private static Json SafeParse(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return null;
+            if (!SS2ReviveData.CommunityCatalog.HasSafeNesting(body)) return null;
+            return Json.TryParse(body);
+        }
+
+        private static byte[] TokenEntropy()
+        {
+            return Encoding.UTF8.GetBytes(TokenEntropyPrefix + _origin.Authority.ToLowerInvariant());
+        }
+
+        private static string OriginFingerprint(Uri origin)
+        {
+            using (var sha = SHA256.Create())
+            {
+                var digest = sha.ComputeHash(Encoding.UTF8.GetBytes(origin.Authority.ToLowerInvariant()));
+                var text = new StringBuilder(16);
+                for (var i = 0; i < 8; i++) text.Append(digest[i].ToString("x2"));
+                return text.ToString();
+            }
+        }
+
         private static void LoadRefreshToken()
         {
             if (_tokenLoaded) return;
@@ -569,12 +705,17 @@ namespace SS2Revive
             {
                 var encrypted = File.ReadAllBytes(_tokenPath);
                 if (encrypted.Length < 32 || encrypted.Length > 8192) throw new InvalidDataException();
-                var plain = ProtectedData.Unprotect(encrypted, TokenEntropy, DataProtectionScope.CurrentUser);
+                var plain = ProtectedData.Unprotect(encrypted, TokenEntropy(), DataProtectionScope.CurrentUser);
                 var value = Encoding.UTF8.GetString(plain);
                 Array.Clear(plain, 0, plain.Length);
-                if (!value.StartsWith("v1\n", StringComparison.Ordinal) || value.Length != 46)
+                var parts = value.Split(SessionFieldSeparator);
+                if (parts.Length != 3 || parts[0] != "v2" || parts[1].Length == 0
+                    || parts[2].Length != 43)
                     throw new InvalidDataException();
-                _refreshToken = value.Substring(3);
+                // Refuse a session minted by a different server even if the file was copied here.
+                if (!string.Equals(parts[1], _origin.Authority, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException();
+                _refreshToken = parts[2];
             }
             catch
             {
@@ -585,10 +726,11 @@ namespace SS2Revive
         private static void SaveRefreshToken()
         {
             if (string.IsNullOrEmpty(_tokenPath) || string.IsNullOrEmpty(_refreshToken)) return;
-            var plain = Encoding.UTF8.GetBytes("v1\n" + _refreshToken);
+            var plain = Encoding.UTF8.GetBytes("v2" + SessionFieldSeparator + _origin.Authority
+                                               + SessionFieldSeparator + _refreshToken);
             try
             {
-                var encrypted = ProtectedData.Protect(plain, TokenEntropy, DataProtectionScope.CurrentUser);
+                var encrypted = ProtectedData.Protect(plain, TokenEntropy(), DataProtectionScope.CurrentUser);
                 AtomicFile.WriteAllBytes(_tokenPath, encrypted);
                 Array.Clear(encrypted, 0, encrypted.Length);
             }

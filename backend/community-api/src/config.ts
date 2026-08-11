@@ -9,9 +9,9 @@ export interface RuntimeConfig {
   authSecret: string;
   mockSteamId64: string;
   publicOrigin: string;
-  downloadDailyBytes: number;
-  downloadConcurrency: number;
   uploadDailyLimit: number;
+  uploadDailyBytes: number;
+  retainedBytesPerAccount: number;
   mapsPerAccountLimit: number;
   maintainerSteamIds: ReadonlySet<string>;
 }
@@ -70,14 +70,18 @@ export function runtimeConfig(env: Env): RuntimeConfig {
   if (!validPublicOrigin(env.PUBLIC_ORIGIN, env.ENVIRONMENT)) {
     throw new HttpError(503, "temporarily_unavailable", "The public origin configuration is invalid.");
   }
-  const downloadDailyBytes = boundedInteger(env.DOWNLOAD_DAILY_BYTES, 1024 * 1024, 100 * 1024 * 1024 * 1024);
-  const downloadConcurrency = boundedInteger(env.DOWNLOAD_CONCURRENCY, 1, 10);
-  if (downloadDailyBytes === null || downloadConcurrency === null) {
-    throw new HttpError(503, "temporarily_unavailable", "The download quota configuration is invalid.");
-  }
   const uploadDailyLimit = boundedInteger(env.UPLOAD_DAILY_LIMIT, 1, 50);
   const mapsPerAccountLimit = boundedInteger(env.MAPS_PER_ACCOUNT_LIMIT, 1, 200);
-  if (uploadDailyLimit === null || mapsPerAccountLimit === null) {
+  const uploadDailyBytes = boundedInteger(env.UPLOAD_DAILY_BYTES, 1024 * 1024, 8 * 1024 * 1024 * 1024);
+  const retainedBytesPerAccount = boundedInteger(
+    env.RETAINED_BYTES_PER_ACCOUNT,
+    1024 * 1024,
+    64 * 1024 * 1024 * 1024,
+  );
+  if (
+    uploadDailyLimit === null || mapsPerAccountLimit === null ||
+    uploadDailyBytes === null || retainedBytesPerAccount === null
+  ) {
     throw new HttpError(503, "temporarily_unavailable", "The publishing quota configuration is invalid.");
   }
   if (typeof env.MAINTAINER_STEAM_IDS !== "string" || env.MAINTAINER_STEAM_IDS.length > 1024) {
@@ -103,9 +107,9 @@ export function runtimeConfig(env: Env): RuntimeConfig {
     authSecret,
     mockSteamId64: env.MOCK_STEAM_ID64,
     publicOrigin: env.PUBLIC_ORIGIN,
-    downloadDailyBytes,
-    downloadConcurrency,
     uploadDailyLimit,
+    uploadDailyBytes,
+    retainedBytesPerAccount,
     mapsPerAccountLimit,
     maintainerSteamIds,
   };

@@ -12,8 +12,9 @@ namespace SS2Revive
     {
         private const int ReplacedFilterIndex = 4; // Newest
         private const string TileName = "SS2ReviveYourMapsButton";
-        private const string UnpublishButtonName = "SS2ReviveUnpublishCommunityButton";
-        private const string ArchiveButtonName = "SS2ReviveArchiveCommunityButton";
+        private const string ManageButtonName = "SS2ReviveManageCommunityButton";
+        private const string OldUnpublishButtonName = "SS2ReviveUnpublishCommunityButton";
+        private const string OldArchiveButtonName = "SS2ReviveArchiveCommunityButton";
 
         private static bool _browseActive;
         private static TerminalLevelBrowseOptions _browseScreen;
@@ -201,12 +202,11 @@ namespace SS2Revive
                     && summary.creatorPlayerIds != null && summary.creatorPlayerIds.Contains(localPlayer);
                 var template = AccessTools.Field(typeof(TerminalLevelModalController), "_editButton")
                     ?.GetValue(__instance) as ExtendedButton;
-                var unpublish = EnsureActionButton(__instance, template, UnpublishButtonName,
-                    "UNPUBLISH", UnpublishClicked, 1);
-                var archive = EnsureActionButton(__instance, template, ArchiveButtonName,
-                    "REMOVE ONLINE", ArchiveClicked, 2);
-                SetVisible(unpublish, ownsOnlineMap);
-                SetVisible(archive, ownsOnlineMap);
+                HideObsoleteAction(__instance, OldUnpublishButtonName);
+                HideObsoleteAction(__instance, OldArchiveButtonName);
+                var manage = EnsureActionButton(__instance, template, ManageButtonName,
+                    "ONLINE OPTIONS", ManageOnlineClicked, 1);
+                SetVisible(manage, ownsOnlineMap);
                 if (ownsOnlineMap) _managementModal = __instance;
             }
             catch (Exception ex)
@@ -264,17 +264,27 @@ namespace SS2Revive
             button.interactable = visible && _activeOperation == null;
         }
 
-        private static void UnpublishClicked(ExtendedButton ignored) => ConfirmAction(false);
-        private static void ArchiveClicked(ExtendedButton ignored) => ConfirmAction(true);
+        private static void HideObsoleteAction(TerminalLevelModalController modal, string name)
+        {
+            var template = AccessTools.Field(typeof(TerminalLevelModalController), "_editButton")
+                ?.GetValue(modal) as ExtendedButton;
+            var old = template == null || template.transform.parent == null
+                ? null : template.transform.parent.Find(name)?.GetComponent<ExtendedButton>();
+            if (old != null) old.gameObject.SetActive(false);
+        }
 
-        private static void ConfirmAction(bool archive)
+        private static void ManageOnlineClicked(ExtendedButton ignored)
         {
             var modal = _managementModal;
             var terminal = AccessTools.Field(typeof(TerminalLevelModalController),
                 "_owningTerminalUIController")?.GetValue(modal) as TerminalUIController;
             if (modal == null || terminal == null || _activeOperation != null) return;
-            terminal.GetTerminalConfirmationModal().Show("DELETE_LEVEL", "CANCEL", "DELETE",
-                null, () => BeginOwnerAction(modal, archive));
+            terminal.GetTerminalConfirmationModal().Show(
+                "ONLINE OPTIONS",
+                "UNPUBLISH",
+                "REMOVE ONLINE",
+                () => BeginOwnerAction(modal, false),
+                () => BeginOwnerAction(modal, true));
         }
 
         private static void BeginOwnerAction(TerminalLevelModalController modal, bool archive)
