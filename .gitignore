@@ -10,9 +10,11 @@ obj/
 # Local machine paths live here and must never be published.
 Directory.Build.user.props
 
-# Documentation is retained locally and transferred manually, not published from this branch.
+# Planning and operational documents stay local; the two public repository guides are exceptions.
 docs/
 *.md
+!/README.md
+!/BUILDING.md
 
 # BepInEx is linked from the README, never vendored here.
 lib/
