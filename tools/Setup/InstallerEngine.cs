@@ -116,7 +116,9 @@ internal static class InstallerEngine
             ["@echo off", $"cd /d \"{EscapeBatchPath(gameFolder)}\"", $"start \"\" \"{EscapeBatchPath(gameExe)}\""],
             Encoding.ASCII,
             cancellationToken);
-        progress.Report("Installation complete.");
+        progress.Report(modInstalled
+            ? "Installation complete."
+            : "Game setup complete, but SS2 Revive requires manual installation.");
         return new InstallResult(installDirectory, gameFolder, launcher, modInstalled, modVersion, modError);
     }
 

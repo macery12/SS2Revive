@@ -35,6 +35,7 @@ const testContext = {
 
 async function clearState(): Promise<void> {
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM maintenance_state"),
     env.DB.prepare("DELETE FROM moderation_events"),
     env.DB.prepare("DELETE FROM map_reports"),
     env.DB.prepare("DELETE FROM upload_usage_daily"),
@@ -323,6 +324,53 @@ describe("validation lease recovery", () => {
     await validateUploadMessage(env, { kind: "map-upload", uploadId }, NOW + 20 * 60 * 1000 + 1);
     expect(await env.DB.prepare("SELECT status FROM map_uploads WHERE id = ?")
       .bind(uploadId).first()).toMatchObject({ status: "published" });
+  });
+});
+
+describe("orphan reconciliation", () => {
+  it("persists an R2 cursor so bounded sweeps eventually reach later pages", async () => {
+    const liveMapId = "2a658233-92c5-4b63-87fc-4740c855730b";
+    const liveKeys = Array.from(
+      { length: 200 },
+      (_, index) => `approved/000-live/${index.toString().padStart(3, "0")}.ss2level`,
+    );
+    const orphanKey = "approved/zzz-orphan.ss2level";
+    await env.DB.prepare(
+      `INSERT INTO maps (id, status, current_revision, title, title_sort, description,
+                         created_at_ms, updated_at_ms, owner_steam_id64)
+       VALUES (?, 'published', 200, 'Live map', 'live map', '', ?, ?, ?)`,
+    ).bind(liveMapId, NOW, NOW, STEAM_ID).run();
+
+    for (let offset = 0; offset < liveKeys.length; offset += 40) {
+      const keys = liveKeys.slice(offset, offset + 40);
+      await env.DB.batch(keys.map((key, inner) => {
+        const revision = offset + inner + 1;
+        return env.DB.prepare(
+          `INSERT INTO map_versions
+             (map_id, revision, status, code, creator_ids_json, tags_json,
+              configurations_json, validations_json, player_counts_csv, client_version,
+              map_format_version, minimum_revive_version, revive_version, size_bytes, sha256,
+              bundle_key, created_at_ms)
+           VALUES (?, ?, 'published', 'orphan-page-test', '[]', '[]', '[]', '[]', ',1,',
+                   29, 29, '1.1.0', '1.1.0', 1, ?, ?, ?)`,
+        ).bind(liveMapId, revision, revision.toString(16).padStart(64, "0"), key, NOW);
+      }));
+      await Promise.all(keys.map((key) => env.MAP_BUCKET.put(key, new Uint8Array([1]))));
+    }
+    await env.MAP_BUCKET.put(orphanKey, new Uint8Array([1]));
+
+    const sweepNow = Date.now() + 2 * 60 * 60 * 1000;
+    await cleanupExpiredState(env, sweepNow);
+    expect(await env.MAP_BUCKET.head(orphanKey)).not.toBeNull();
+    expect(await env.DB.prepare(
+      "SELECT value FROM maintenance_state WHERE key = 'approved_object_cursor'",
+    ).first()).not.toBeNull();
+
+    await cleanupExpiredState(env, sweepNow + 1);
+    expect(await env.MAP_BUCKET.head(orphanKey)).toBeNull();
+    expect(await env.DB.prepare(
+      "SELECT value FROM maintenance_state WHERE key = 'approved_object_cursor'",
+    ).first()).toBeNull();
   });
 });
 

@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import { sha256Hex, type AuthPrincipal } from "@ss2revive/community-contracts";
+import { MAX_TITLE_CHARACTERS, sha256Hex, type AuthPrincipal } from "@ss2revive/community-contracts";
+import { archiveOwnMap } from "../src/community-controls";
 import { runtimeConfig } from "../src/config";
 import { issueAccessToken } from "../src/crypto";
 import { buildLocalFixture } from "../src/local-fixture";
@@ -18,9 +19,15 @@ const principal: AuthPrincipal = {
   sessionId: "11111111-1111-1111-1111-111111111111",
   scopes: ["maps:read", "maps:download", "maps:upload", "maps:manage", "maps:report", "maps:moderate"],
 };
+const testContext = {
+  waitUntil(promise: Promise<unknown>): void { void promise.catch(() => undefined); },
+  passThroughOnException(): void {},
+  props: {},
+} as unknown as ExecutionContext;
 
 async function clearState(): Promise<void> {
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM maintenance_state"),
     env.DB.prepare("DELETE FROM moderation_events"),
     env.DB.prepare("DELETE FROM map_reports"),
     env.DB.prepare("DELETE FROM upload_usage_daily"),
@@ -154,6 +161,70 @@ describe("authenticated map uploads", () => {
     expect(await env.MAP_BUCKET.head(fixture.thumbnailKey)).not.toBeNull();
   });
 
+  it("charges storage once across a transient validation retry", async () => {
+    const nowMs = Date.UTC(2026, 7, 8, 23, 59, 58);
+    const first = await buildLocalFixture();
+    const firstId = await reserve(first.bytes, first.sha256, nowMs);
+    await put(firstId, first.bytes, first.sha256, nowMs + 1);
+    await validateUploadMessage(env, { kind: "map-upload", uploadId: firstId }, nowMs + 2);
+    const before = await env.DB.prepare(
+      "SELECT retained_bytes FROM account_storage WHERE steam_id64 = ?",
+    ).bind(STEAM_ID).first<{ retained_bytes: number }>();
+
+    const second = await buildLocalFixture({ contentVersion: 2, exportedAtMs: nowMs - 1000, nowMs });
+    const secondId = await reserve(second.bytes, second.sha256, nowMs + 3);
+    await put(secondId, second.bytes, second.sha256, nowMs + 4);
+    await env.DB.prepare(
+      `INSERT INTO map_versions
+         (map_id, revision, status, code, creator_ids_json, tags_json, configurations_json,
+          validations_json, player_counts_csv, client_version, map_format_version,
+          minimum_revive_version, revive_version, size_bytes, sha256, bundle_key, created_at_ms)
+       SELECT map_id, 2, 'unpublished', code, creator_ids_json, tags_json, configurations_json,
+              validations_json, player_counts_csv, client_version, map_format_version,
+              minimum_revive_version, revive_version, size_bytes, sha256,
+              'approved/conflicting-revision.ss2level', created_at_ms
+         FROM map_versions WHERE map_id = ? AND revision = 1`,
+    ).bind("1a658233-92c5-4b63-87fc-4740c855730b").run();
+
+    await expect(validateUploadMessage(env, { kind: "map-upload", uploadId: secondId }, nowMs + 5))
+      .rejects.toBeInstanceOf(Error);
+    const afterFailure = await env.DB.prepare(
+      "SELECT retained_bytes FROM account_storage WHERE steam_id64 = ?",
+    ).bind(STEAM_ID).first<{ retained_bytes: number }>();
+    expect(afterFailure!.retained_bytes).toBe(before!.retained_bytes + second.bytes.length + 17);
+    expect(await env.DB.prepare("SELECT status, quota_state FROM map_uploads WHERE id = ?")
+      .bind(secondId).first()).toMatchObject({ status: "uploaded", quota_state: "reserved" });
+
+    await env.DB.prepare("DELETE FROM map_versions WHERE map_id = ? AND revision = 2")
+      .bind("1a658233-92c5-4b63-87fc-4740c855730b").run();
+    // Retry after midnight: the original day's persisted reservation remains authoritative.
+    await validateUploadMessage(env, { kind: "map-upload", uploadId: secondId }, nowMs + 3_000);
+    const afterSuccess = await env.DB.prepare(
+      "SELECT retained_bytes FROM account_storage WHERE steam_id64 = ?",
+    ).bind(STEAM_ID).first<{ retained_bytes: number }>();
+    expect(afterSuccess).toEqual(afterFailure);
+    expect(await env.DB.prepare("SELECT status, quota_state FROM map_uploads WHERE id = ?")
+      .bind(secondId).first()).toMatchObject({ status: "published", quota_state: "published" });
+  });
+
+  it("refunds storage and daily bytes when validation rejects after charging", async () => {
+    const nowMs = Date.UTC(2026, 7, 8, 12, 0, 0);
+    const fixture = await buildLocalFixture({ title: "İ".repeat(MAX_TITLE_CHARACTERS) });
+    const uploadId = await reserve(fixture.bytes, fixture.sha256, nowMs);
+    await put(uploadId, fixture.bytes, fixture.sha256, nowMs + 1);
+    await validateUploadMessage(env, { kind: "map-upload", uploadId }, nowMs + 2);
+
+    expect(await env.DB.prepare("SELECT status, error_code, quota_state FROM map_uploads WHERE id = ?")
+      .bind(uploadId).first()).toMatchObject({
+        status: "rejected", error_code: "title_invalid", quota_state: "none",
+      });
+    expect(await env.DB.prepare("SELECT retained_bytes FROM account_storage WHERE steam_id64 = ?")
+      .bind(STEAM_ID).first()).toMatchObject({ retained_bytes: 0 });
+    expect(await env.DB.prepare(
+      "SELECT bytes_published FROM upload_usage_daily WHERE steam_id64 = ?",
+    ).bind(STEAM_ID).first()).toMatchObject({ bytes_published: 0 });
+  });
+
   it("accepts an unchanged revision again when only export time and validation state changed", async () => {
     const nowMs = Date.UTC(2026, 7, 8, 12, 0, 0);
     const fixture = await buildLocalFixture();
@@ -274,7 +345,7 @@ describe("authenticated map uploads", () => {
       .rejects.toMatchObject({ code: "daily_upload_limit_reached", status: 429 });
   });
 
-  it("rejects a new map after the lifetime per-account map quota is reached", async () => {
+  it("does not count archived tombstones against the active map quota", async () => {
     const nowMs = Date.UTC(2026, 7, 8, 12, 0, 0);
     const statements: D1PreparedStatement[] = [];
     for (let index = 0; index < 25; index += 1) {
@@ -291,8 +362,70 @@ describe("authenticated map uploads", () => {
     const uploadId = await reserve(fixture.bytes, fixture.sha256, nowMs + 1);
     expect((await put(uploadId, fixture.bytes, fixture.sha256, nowMs + 2)).status).toBe(202);
     await validateUploadMessage(env, { kind: "map-upload", uploadId }, nowMs + 3);
+    expect(await env.DB.prepare("SELECT status FROM map_uploads WHERE id = ?")
+      .bind(uploadId).first()).toMatchObject({ status: "published" });
+  });
+
+  it("rejects a new map after the active per-account map quota is reached", async () => {
+    const nowMs = Date.UTC(2026, 7, 8, 12, 0, 0);
+    const statements: D1PreparedStatement[] = [];
+    for (let index = 0; index < 25; index += 1) {
+      const id = crypto.randomUUID();
+      statements.push(env.DB.prepare(
+        `INSERT INTO maps
+           (id, status, current_revision, title, title_sort, description,
+            created_at_ms, updated_at_ms, owner_steam_id64)
+         VALUES (?, 'unpublished', 1, ?, ?, '', ?, ?, ?)`,
+      ).bind(id, `Active ${index}`, `active ${index}`, nowMs, nowMs, STEAM_ID));
+    }
+    await env.DB.batch(statements);
+    const fixture = await buildLocalFixture();
+    const uploadId = await reserve(fixture.bytes, fixture.sha256, nowMs + 1);
+    await put(uploadId, fixture.bytes, fixture.sha256, nowMs + 2);
+    await validateUploadMessage(env, { kind: "map-upload", uploadId }, nowMs + 3);
+    expect(await env.DB.prepare("SELECT status, error_code FROM map_uploads WHERE id = ?")
+      .bind(uploadId).first()).toMatchObject({ status: "rejected", error_code: "map_quota_reached" });
+  });
+
+  it("keeps an ownership tombstone and requires a newer revision to republish", async () => {
+    const nowMs = Date.UTC(2026, 7, 8, 12, 0, 0);
+    const first = await buildLocalFixture();
+    const firstId = await reserve(first.bytes, first.sha256, nowMs);
+    await put(firstId, first.bytes, first.sha256, nowMs + 1);
+    await validateUploadMessage(env, { kind: "map-upload", uploadId: firstId }, nowMs + 2);
+    await archiveOwnMap(
+      new Request(`${ORIGIN}/v1/maps/1a658233-92c5-4b63-87fc-4740c855730b`, { method: "DELETE" }),
+      env, runtimeConfig(env), testContext, principal,
+      "1a658233-92c5-4b63-87fc-4740c855730b", crypto.randomUUID(), nowMs + 3,
+    );
     expect(await env.DB.prepare(
-      "SELECT status, error_code FROM map_uploads WHERE id = ?",
-    ).bind(uploadId).first()).toMatchObject({ status: "rejected", error_code: "map_quota_reached" });
+      "SELECT status, current_revision, owner_steam_id64, archive_operation_id FROM maps WHERE id = ?",
+    )
+      .bind("1a658233-92c5-4b63-87fc-4740c855730b").first()).toMatchObject({
+        status: "archived", current_revision: 1, owner_steam_id64: STEAM_ID,
+        archive_operation_id: expect.any(String),
+      });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM map_versions WHERE map_id = ?")
+      .bind("1a658233-92c5-4b63-87fc-4740c855730b").first()).toMatchObject({ count: 0 });
+    expect(await env.DB.prepare("SELECT retained_bytes FROM account_storage WHERE steam_id64 = ?")
+      .bind(STEAM_ID).first()).toMatchObject({ retained_bytes: 0 });
+    expect((await env.MAP_BUCKET.list({
+      prefix: "approved/", limit: 100,
+    })).objects).toHaveLength(0);
+
+    const repeatedId = await reserve(first.bytes, first.sha256, nowMs + 4);
+    await put(repeatedId, first.bytes, first.sha256, nowMs + 5);
+    await validateUploadMessage(env, { kind: "map-upload", uploadId: repeatedId }, nowMs + 6);
+    expect(await env.DB.prepare("SELECT status, error_code FROM map_uploads WHERE id = ?")
+      .bind(repeatedId).first()).toMatchObject({ status: "rejected", error_code: "revision_not_newer" });
+
+    const second = await buildLocalFixture({ contentVersion: 2, exportedAtMs: nowMs - 1000, nowMs });
+    const secondId = await reserve(second.bytes, second.sha256, nowMs + 7);
+    await put(secondId, second.bytes, second.sha256, nowMs + 8);
+    await validateUploadMessage(env, { kind: "map-upload", uploadId: secondId }, nowMs + 9);
+    expect(await env.DB.prepare("SELECT status, current_revision FROM maps WHERE id = ?")
+      .bind("1a658233-92c5-4b63-87fc-4740c855730b").first()).toMatchObject({
+        status: "published", current_revision: 2,
+      });
   });
 });

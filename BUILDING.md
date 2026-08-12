@@ -72,7 +72,7 @@ The version is defined once as `SS2ReviveVersion` in `Directory.Build.props`. Ex
 | Path | Purpose |
 |---|---|
 | `src/SS2Revive` | BepInEx plugin, Harmony patches, Steam transport, community UI, and game integration |
-| `src/SS2Revive_Data` | Local data backend, UGC storage, bundle parsing, and persistence |
+| `src/SS2Revive_Data` | Local data backend, level storage, bundle parsing, and persistence |
 | `tests/DataTests` | Standalone data and installed-game compatibility checks |
 | `tools/Setup` | Windows setup application |
 | `assets/newsfeed` | Authored local news-feed configuration |

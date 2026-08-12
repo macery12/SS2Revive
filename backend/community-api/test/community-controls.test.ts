@@ -29,6 +29,7 @@ const reporterPrincipal: AuthPrincipal = {
 
 async function clearState(): Promise<void> {
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM maintenance_state"),
     env.DB.prepare("DELETE FROM moderation_events"),
     env.DB.prepare("DELETE FROM map_reports"),
     env.DB.prepare("DELETE FROM upload_usage_daily"),
@@ -61,8 +62,15 @@ const testContext = {
 beforeEach(clearState);
 
 describe("community ownership and moderation controls", () => {
-  it("lets the verified owner unpublish and archive without deleting approved objects", async () => {
+  it("lets the verified owner unpublish and archive while releasing retained storage", async () => {
     const nowMs = Date.UTC(2026, 7, 8, 12);
+    const retained = await env.DB.prepare(
+      `SELECT SUM(size_bytes + COALESCE(thumbnail_size_bytes, 0)) AS bytes
+         FROM map_versions WHERE map_id = ?`,
+    ).bind(MAP_ID).first<{ bytes: number }>();
+    await env.DB.prepare(
+      `INSERT INTO account_storage (steam_id64, retained_bytes, updated_at) VALUES (?, ?, ?)`,
+    ).bind(OWNER, retained!.bytes, nowMs).run();
     const unpublished = await unpublishOwnMap(
       new Request(`${ORIGIN}/v1/maps/${MAP_ID}/unpublish`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
@@ -79,8 +87,12 @@ describe("community ownership and moderation controls", () => {
     expect(archived.status).toBe(204);
     expect(await env.DB.prepare("SELECT status FROM maps WHERE id = ?").bind(MAP_ID).first())
       .toMatchObject({ status: "archived" });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM map_versions WHERE map_id = ?")
+      .bind(MAP_ID).first()).toMatchObject({ count: 0 });
+    expect(await env.DB.prepare("SELECT retained_bytes FROM account_storage WHERE steam_id64 = ?")
+      .bind(OWNER).first()).toMatchObject({ retained_bytes: 0 });
     const objects = await env.MAP_BUCKET.list({ prefix: `approved/maps/${MAP_ID}/` });
-    expect(objects.objects.length).toBeGreaterThan(0);
+    expect(objects.objects.length).toBe(0);
   });
 
   it("stores one bounded report per reporter and exposes it only to the maintainer", async () => {
@@ -131,5 +143,50 @@ describe("community ownership and moderation controls", () => {
       .toMatchObject({ status: "published" });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM moderation_events WHERE map_id = ?")
       .bind(MAP_ID).first()).toMatchObject({ count: 2 });
+  });
+
+  it("refuses to take down an owner-unpublished map", async () => {
+    const nowMs = Date.UTC(2026, 7, 8, 12);
+    await unpublishOwnMap(
+      new Request(`${ORIGIN}/v1/maps/${MAP_ID}/unpublish`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      }), env, runtimeConfig(env), testContext, ownerPrincipal, MAP_ID, crypto.randomUUID(), nowMs,
+    );
+    await expect(takedownMap(
+      new Request(`${ORIGIN}/v1/moderation/maps/${MAP_ID}/takedown`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "Should not resurrect" }),
+      }), env, runtimeConfig(env), testContext, ownerPrincipal, MAP_ID, crypto.randomUUID(), nowMs + 1,
+    )).rejects.toMatchObject({ status: 409, code: "map_not_published" });
+    expect(await env.DB.prepare("SELECT status, moderation_reason FROM maps WHERE id = ?")
+      .bind(MAP_ID).first()).toMatchObject({ status: "unpublished", moderation_reason: null });
+  });
+
+  it("lets an owner permanently archive a takedown so restore cannot resurrect it", async () => {
+    const nowMs = Date.UTC(2026, 7, 8, 12);
+    await takedownMap(
+      new Request(`${ORIGIN}/v1/moderation/maps/${MAP_ID}/takedown`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "Maintainer takedown" }),
+      }), env, runtimeConfig(env), testContext, ownerPrincipal, MAP_ID, crypto.randomUUID(), nowMs,
+    );
+    await archiveOwnMap(
+      new Request(`${ORIGIN}/v1/maps/${MAP_ID}`, { method: "DELETE" }),
+      env, runtimeConfig(env), testContext, ownerPrincipal, MAP_ID, crypto.randomUUID(), nowMs + 1,
+    );
+    expect(await env.DB.prepare(
+      "SELECT status, moderation_reason, archive_operation_id FROM maps WHERE id = ?",
+    ).bind(MAP_ID).first()).toMatchObject({
+      status: "archived", moderation_reason: null, archive_operation_id: expect.any(String),
+    });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM map_versions WHERE map_id = ?")
+      .bind(MAP_ID).first()).toMatchObject({ count: 0 });
+
+    await expect(restoreMap(
+      new Request(`${ORIGIN}/v1/moderation/maps/${MAP_ID}/restore`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "Should remain archived" }),
+      }), env, runtimeConfig(env), testContext, ownerPrincipal, MAP_ID, crypto.randomUUID(), nowMs + 2,
+    )).rejects.toMatchObject({ status: 409, code: "map_not_moderated" });
   });
 });

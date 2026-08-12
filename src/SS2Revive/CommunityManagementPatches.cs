@@ -366,7 +366,10 @@ namespace SS2Revive
             try { Application.OpenURL(uri.AbsoluteUri); }
             catch (Exception ex)
             {
+                _activeOperation?.Cancel();
+                _activeOperation = null;
                 TerminalMessage.Show("Could not open Steam login: " + ex.Message, true);
+                if (_managementModal != null) LevelDisplayed_Postfix(_managementModal);
             }
         }
 

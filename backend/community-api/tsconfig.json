@@ -10,6 +10,7 @@
     "test/**/*.ts",
     "vitest.config.ts",
     "worker-configuration.d.ts",
+    "worker-configuration.production.d.ts",
     "test-bindings.d.ts"
   ]
 }

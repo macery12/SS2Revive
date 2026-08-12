@@ -60,9 +60,9 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Check generated bindings and types
-        # Regenerates worker-configuration.d.ts from wrangler.jsonc and fails if the committed copy
-        # has drifted, then type-checks against it. A binding added to the config but never wired up
-        # is caught here rather than at deploy time.
+        # Regenerates both local and production-example binding declarations and fails if either
+        # committed copy has drifted, then type-checks against their merged binding surface. A
+        # binding added to either config but never wired up is caught here rather than at deploy time.
         run: pnpm run check
 
       - name: Run Worker tests

@@ -55,6 +55,12 @@ namespace SS2Revive
 
         private const int MaxPacketSize = 1280;
 
+        // Pump runs on Unity's main thread. A peer can keep Steam's receive queue non-empty, so a
+        // plain "while available" loop lets network traffic consume an entire frame indefinitely.
+        // Bound both calls and copied bytes; the next frame resumes at the head of Steam's queue.
+        private const int MaxPacketsPerFrame = 128;
+        private const int MaxBytesPerFrame = 160 * 1024;
+
         // Only accounts we have actually seen in the party are translated. Without this, a packet
         // aimed at a real STUN or TURN server could be mistaken for a peer if its address happened
         // to decode to something plausible.
@@ -91,6 +97,7 @@ namespace SS2Revive
 
         private struct QueuedReceive
         {
+            public ulong SteamId;
             public IPEndPoint Sender;
             public byte[] Data;
             public int Length;
@@ -103,7 +110,7 @@ namespace SS2Revive
         private static readonly object ReceiveLock = new object();
         private static readonly AutoResetEvent InboundReady = new AutoResetEvent(false);
         private static Thread _deliveryThread;
-        private static volatile bool _exiting;
+        private static int _deliveryGeneration;
         private static int _droppedReceives;
 
         // Reused per peer so the game is handed a stable instance. NetworkPeerManager stores the
@@ -121,6 +128,9 @@ namespace SS2Revive
 
         internal static void Initialise()
         {
+            _sessionRequest?.Dispose();
+            _sessionFailed?.Dispose();
+
             // Anyone in our lobby is expected; accepting is what opens the session in both
             // directions. There is no wider exposure here than the lobby already implies.
             _sessionRequest = Callback<P2PSessionRequest_t>.Create(OnSessionRequest);
@@ -150,8 +160,10 @@ namespace SS2Revive
             if (_deliveryThread != null)
                 return;
 
-            _exiting = false;
-            _deliveryThread = new Thread(DeliveryThread_Execute)
+            // Each worker owns an immutable generation. Shutdown advances the generation, so a
+            // quick reattach can never turn an old worker back on by clearing one shared bool.
+            var generation = Interlocked.Increment(ref _deliveryGeneration);
+            _deliveryThread = new Thread(() => DeliveryThread_Execute(generation))
             {
                 Name = "SS2Revive Steam delivery",
                 // Background, so a thread parked on NetworkReceiver's backpressure cannot keep the
@@ -182,6 +194,92 @@ namespace SS2Revive
         {
             lock (PeerLock)
                 return Peers.Contains(steamId64);
+        }
+
+        /// <summary>
+        /// Replaces the transport authorization set with the live Steam lobby roster. Departed
+        /// peers lose their sessions, synthetic endpoints, and any traffic already queued for or
+        /// from them; otherwise stale members remained addressable until the whole lobby closed.
+        /// Must be called from the Steam/main thread.
+        /// </summary>
+        internal static void SynchronizePeers(IList<ulong> livePeers)
+        {
+            var desired = new HashSet<ulong>();
+            if (livePeers != null)
+                for (var i = 0; i < livePeers.Count; i++)
+                    if (livePeers[i] != 0UL)
+                        desired.Add(livePeers[i]);
+
+            var removed = new HashSet<ulong>();
+            lock (PeerLock)
+            {
+                foreach (var peer in Peers)
+                    if (!desired.Contains(peer))
+                        removed.Add(peer);
+
+                Peers.Clear();
+                foreach (var peer in desired)
+                    Peers.Add(peer);
+            }
+
+            if (removed.Count == 0)
+                return;
+
+            var purgedSends = 0;
+            lock (SendLock)
+            {
+                var queued = Outbound.Count;
+                for (var i = 0; i < queued; i++)
+                {
+                    var send = Outbound.Dequeue();
+                    if (removed.Contains(send.SteamId))
+                    {
+                        BufferPool.Push(send.Data);
+                        purgedSends++;
+                    }
+                    else
+                    {
+                        Outbound.Enqueue(send);
+                    }
+                }
+            }
+
+            var purgedReceives = 0;
+            lock (ReceiveLock)
+            {
+                var queued = Inbound.Count;
+                for (var i = 0; i < queued; i++)
+                {
+                    var receive = Inbound.Dequeue();
+                    if (removed.Contains(receive.SteamId))
+                    {
+                        ReceivePool.Push(receive.Data);
+                        purgedReceives++;
+                    }
+                    else
+                    {
+                        Inbound.Enqueue(receive);
+                    }
+                }
+            }
+
+            foreach (var peer in removed)
+            {
+                EndPoints.Remove(peer);
+                try
+                {
+                    if (SteamIdentity.IsSteamReady())
+                        SteamNetworking.CloseP2PSessionWithUser(new CSteamID(peer));
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning("Closing the departed P2P session with " + peer
+                                          + " failed: " + ex.Message);
+                }
+            }
+
+            Plugin.Log.LogInfo("Removed " + removed.Count + " departed Steam peer(s); purged "
+                               + purgedSends + " send(s) and " + purgedReceives + " receive(s).");
         }
 
         internal static int Port => SyntheticPort;
@@ -317,22 +415,41 @@ namespace SS2Revive
             FlushOutbound();
 
             var queued = 0;
+            var processed = 0;
+            var processedBytes = 0;
+            var oversized = 0;
 
             try
             {
-                while (SteamNetworking.IsP2PPacketAvailable(out var size, Channel))
+                while (processed < MaxPacketsPerFrame && processedBytes < MaxBytesPerFrame
+                       && SteamNetworking.IsP2PPacketAvailable(out var size, Channel))
                 {
+                    // Charge the declared packet size, not just bytes retained by this transport.
+                    // That keeps truncated oversized drops inside the same work budget. Values
+                    // above the whole budget saturate it, so one such packet is drained per frame.
+                    var budgetCost = size >= (uint)MaxBytesPerFrame
+                        ? MaxBytesPerFrame
+                        : (int)size;
+                    if (budgetCost > MaxBytesPerFrame - processedBytes)
+                        break;
+
                     if (size > MaxPacketSize)
                     {
-                        // Read and drop: leaving it queued would block every packet behind it.
-                        SteamNetworking.ReadP2PPacket(ReadBuffer, MaxPacketSize, out _, out _, Channel);
-                        Plugin.Log.LogWarning("Dropped oversized P2P packet (" + size + " bytes).");
+                        if (!SteamNetworking.ReadP2PPacket(ReadBuffer, MaxPacketSize,
+                                out _, out _, Channel))
+                            break;
+                        processed++;
+                        processedBytes += budgetCost;
+                        oversized++;
                         continue;
                     }
 
                     if (!SteamNetworking.ReadP2PPacket(ReadBuffer, MaxPacketSize,
                             out var read, out var sender, Channel))
                         break;
+
+                    processed++;
+                    processedBytes += budgetCost;
 
                     // Authorising here, not on the delivery thread, is deliberate: IsLobbyMember
                     // asks Steam, and Steam is only ever asked from this thread.
@@ -375,6 +492,7 @@ namespace SS2Revive
 
                         Inbound.Enqueue(new QueuedReceive
                         {
+                            SteamId = steamId,
                             Sender = endPoint,
                             Data = data,
                             Length = (int)read
@@ -388,6 +506,9 @@ namespace SS2Revive
             {
                 Plugin.Log.LogError("Steam receive pump threw: " + ex);
             }
+
+            if (oversized > 0)
+                Plugin.Log.LogWarning("Dropped " + oversized + " oversized P2P packet(s).");
 
             if (queued > 0)
                 InboundReady.Set();
@@ -415,11 +536,11 @@ namespace SS2Revive
         /// So we mirror the game's own arrangement: Steam is read on the main thread because
         /// Steamworks demands it, and the game is fed from a thread that is allowed to wait.
         /// </summary>
-        private static void DeliveryThread_Execute()
+        private static void DeliveryThread_Execute(int generation)
         {
             var args = new object[3];
 
-            while (!_exiting)
+            while (generation == Volatile.Read(ref _deliveryGeneration))
             {
                 QueuedReceive item;
 
@@ -495,8 +616,7 @@ namespace SS2Revive
 
         internal static void Reset()
         {
-            lock (PeerLock)
-                Peers.Clear();
+            SynchronizePeers(new ulong[0]);
 
             lock (SendLock)
             {
@@ -522,12 +642,31 @@ namespace SS2Revive
         /// </summary>
         internal static void Shutdown()
         {
-            _exiting = true;
+            // Invalidate this exact worker permanently before waking it. A later attach receives a
+            // newer generation and cannot revive the old loop.
+            Interlocked.Increment(ref _deliveryGeneration);
             InboundReady.Set();
+
+            var deliveryThread = _deliveryThread;
+            if (deliveryThread != null && deliveryThread != Thread.CurrentThread
+                && !deliveryThread.Join(2000))
+            {
+                // OnReceivePacket can apply backpressure that only Unity's main thread drains.
+                // OnDestroy runs on that thread, so an unbounded Join could deadlock teardown.
+                // Generation invalidation prevents another dequeue; any in-flight item owns its
+                // buffer until the worker's finally block returns it to the locked receive pool.
+                Plugin.Log.LogWarning("Steam delivery thread did not stop within two seconds.");
+            }
+
             _deliveryThread = null;
             _clientManager = null;
             _onReceivePacket = null;
             Reset();
+
+            _sessionRequest?.Dispose();
+            _sessionRequest = null;
+            _sessionFailed?.Dispose();
+            _sessionFailed = null;
         }
 
         internal static int QueuedSends

@@ -10,11 +10,13 @@ obj/
 # Local machine paths live here and must never be published.
 Directory.Build.user.props
 
-# Planning and operational documents stay local; the two public repository guides are exceptions.
+# Planning and operational documents stay local; explicitly listed repository guides are public.
 docs/
 *.md
 !/README.md
 !/BUILDING.md
+!/backend/README.md
+!/backend/community-api/README.md
 
 # BepInEx is linked from the README, never vendored here.
 lib/

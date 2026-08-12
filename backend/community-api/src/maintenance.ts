@@ -24,7 +24,8 @@ async function reclaimStaleValidations(env: Env, nowMs: number): Promise<void> {
     ...expired.map((row) => env.DB.prepare(
       `UPDATE map_uploads
           SET status = 'expired', completed_at = ?, validation_lease = NULL,
-              validation_started_at = NULL, validation_lease_expires_at = NULL
+              validation_started_at = NULL, validation_lease_expires_at = NULL,
+              quota_state = CASE WHEN quota_state = 'reserved' THEN 'none' ELSE quota_state END
         WHERE id = ? AND status = 'validating'`,
     ).bind(nowMs, row.id)),
     // Still inside its window: drop the dead lease so a redelivery can claim it again. Any
@@ -47,10 +48,15 @@ async function reclaimStaleValidations(env: Env, nowMs: number): Promise<void> {
 const ORPHAN_GRACE_MS = 60 * 60 * 1000;
 
 async function reconcileOrphanedObjects(env: Env, nowMs: number): Promise<void> {
-  const listed = await env.MAP_BUCKET.list({ prefix: "approved/", limit: 200 });
+  const state = await env.DB.prepare(
+    `SELECT value FROM maintenance_state WHERE key = 'approved_object_cursor'`,
+  ).first<{ value: string }>();
+  const listed = await env.MAP_BUCKET.list({
+    prefix: "approved/",
+    limit: 200,
+    ...(state === null ? {} : { cursor: state.value }),
+  });
   const candidates = listed.objects.filter((object) => object.uploaded.getTime() <= nowMs - ORPHAN_GRACE_MS);
-  if (candidates.length === 0) return;
-
   const referenced = new Set<string>();
   for (let index = 0; index < candidates.length; index += 50) {
     const slice = candidates.slice(index, index + 50);
@@ -63,9 +69,20 @@ async function reconcileOrphanedObjects(env: Env, nowMs: number): Promise<void> 
     for (const row of rows.results) referenced.add(row.key);
   }
   const orphans = candidates.filter((object) => !referenced.has(object.key)).map((object) => object.key);
-  if (orphans.length === 0) return;
-  await env.MAP_BUCKET.delete(orphans);
-  console.log(JSON.stringify({ event: "orphan_objects_collected", count: orphans.length }));
+  if (orphans.length > 0) {
+    await env.MAP_BUCKET.delete(orphans);
+    console.log(JSON.stringify({ event: "orphan_objects_collected", count: orphans.length }));
+  }
+
+  if (listed.truncated && listed.cursor !== undefined) {
+    await env.DB.prepare(
+      `INSERT INTO maintenance_state (key, value, updated_at)
+       VALUES ('approved_object_cursor', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    ).bind(listed.cursor, nowMs).run();
+  } else {
+    await env.DB.prepare(`DELETE FROM maintenance_state WHERE key = 'approved_object_cursor'`).run();
+  }
 }
 
 export async function cleanupExpiredState(env: Env, nowMs: number): Promise<void> {
@@ -78,7 +95,8 @@ export async function cleanupExpiredState(env: Env, nowMs: number): Promise<void
   if (expiredUploads.results.length > 0) {
     await env.MAP_BUCKET.delete(expiredUploads.results.map((row) => row.quarantine_key));
     await env.DB.batch(expiredUploads.results.map((row) => env.DB.prepare(
-      `UPDATE map_uploads SET status = 'expired', completed_at = ?
+      `UPDATE map_uploads SET status = 'expired', completed_at = ?,
+                              quota_state = CASE WHEN quota_state = 'reserved' THEN 'none' ELSE quota_state END
         WHERE id = ? AND status IN ('reserved', 'uploaded')`,
     ).bind(nowMs, row.id)));
   }

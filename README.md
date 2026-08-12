@@ -73,7 +73,7 @@ Every Steam-authenticated player can publish. Steam login verifies that the brow
 
 1. Save a level that you created in Creation Mode.
 2. Open its details and choose **PUBLISH**.
-3. Review the local preflight result.
+3. Wait for the local packaging and checksum preflight to finish.
 4. Complete Steam authentication in the system browser when prompted.
 5. Return to the game while the bundle is quarantined, validated, and published.
 

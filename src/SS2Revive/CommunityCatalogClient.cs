@@ -24,9 +24,19 @@ namespace SS2Revive
 
         private static readonly object Gate = new object();
         private static readonly object ObjectCacheGate = new object();
-        private static readonly Dictionary<string, int> ConfirmedPublished =
-            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private sealed class PublicationConfirmation
+        {
+            internal int Revision;
+            internal DateTime ConfirmedUtc;
+        }
+
+        private static readonly Dictionary<string, PublicationConfirmation> ConfirmedPublished =
+            new Dictionary<string, PublicationConfirmation>(StringComparer.OrdinalIgnoreCase);
         private static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(10);
+        // A publication response can arrive before the catalogue cache sees the new revision. Keep
+        // the optimistic UI state through two normal refresh windows, then trust a successful live
+        // catalogue so a later takedown or removal cannot remain session-sticky forever.
+        private static readonly TimeSpan PublicationConfirmationGrace = TimeSpan.FromMinutes(20);
 
         private static UgcStore _store;
         private static Uri _catalogUri;
@@ -160,10 +170,16 @@ namespace SS2Revive
             if (!Guid.TryParse(mapId, out parsed) || revision < 1) return;
             lock (Gate)
             {
-                int current;
+                PublicationConfirmation current;
                 var id = parsed.ToString();
-                if (!ConfirmedPublished.TryGetValue(id, out current) || revision > current)
-                    ConfirmedPublished[id] = revision;
+                if (!ConfirmedPublished.TryGetValue(id, out current) || revision >= current.Revision)
+                {
+                    ConfirmedPublished[id] = new PublicationConfirmation
+                    {
+                        Revision = revision,
+                        ConfirmedUtc = DateTime.UtcNow
+                    };
+                }
             }
         }
 
@@ -405,7 +421,11 @@ namespace SS2Revive
                     if (!CommunityCatalog.TryParse(bytes, out parsed, out warning))
                         throw new InvalidDataException(warning ?? "The catalogue is invalid.");
                     liveSucceeded = true;
-                    lock (Gate) _catalog = parsed;
+                    lock (Gate)
+                    {
+                        _catalog = parsed;
+                        ReconcilePublicationConfirmations(parsed, DateTime.UtcNow);
+                    }
                     UgcBackend.ReconcileCommunityPublications(parsed.Entries);
                     Dispatcher.NextFrame(SharingPatches.RefreshCurrentCreateScreen);
                     WriteAtomic(_catalogCacheFile, bytes);
@@ -434,6 +454,34 @@ namespace SS2Revive
                         Dispatcher.NextFrame(() => CompleteConnectionWaiters(waiters, liveSucceeded));
                 }
             });
+        }
+
+        private static void ReconcilePublicationConfirmations(CommunityCatalog catalog, DateTime nowUtc)
+        {
+            if (catalog == null || ConfirmedPublished.Count == 0) return;
+
+            var publishedRevisions = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (var i = 0; i < catalog.Entries.Count; i++)
+            {
+                var entry = catalog.Entries[i];
+                if (entry == null || string.IsNullOrEmpty(entry.Id)) continue;
+                int current;
+                if (!publishedRevisions.TryGetValue(entry.Id, out current)
+                    || entry.Revision > current)
+                    publishedRevisions[entry.Id] = entry.Revision;
+            }
+
+            var remove = new List<string>();
+            foreach (var pair in ConfirmedPublished)
+            {
+                int liveRevision;
+                if ((publishedRevisions.TryGetValue(pair.Key, out liveRevision)
+                     && liveRevision >= pair.Value.Revision)
+                    || nowUtc - pair.Value.ConfirmedUtc >= PublicationConfirmationGrace)
+                    remove.Add(pair.Key);
+            }
+            for (var i = 0; i < remove.Count; i++)
+                ConfirmedPublished.Remove(remove[i]);
         }
 
         private static void CompleteConnectionWaiters(List<Action<bool>> waiters, bool connected)

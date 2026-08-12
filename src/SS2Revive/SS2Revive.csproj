@@ -118,7 +118,7 @@
     </Reference>
 
     <!--
-      The terminal UI, for the export and import buttons in SharingPatches. IMGUIModule is here for
+      The terminal UI for the Export action in SharingPatches. IMGUIModule is here for
       GUIUtility.systemCopyBuffer alone - the clipboard is where the share code has to end up, and
       it is the same call the game's own share window makes.
     -->

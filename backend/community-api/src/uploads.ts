@@ -43,13 +43,16 @@ interface UploadRow {
   expires_at: number;
   validation_lease: string | null;
   validation_started_at: number | null;
+  quota_state: "none" | "reserved" | "published";
+  quota_bytes_charged: number;
+  quota_day_utc: string | null;
 }
 
 interface ExistingMapRow {
   current_revision: number;
-  creator_ids_json: string;
-  sha256: string;
-  bundle_key: string;
+  creator_ids_json: string | null;
+  sha256: string | null;
+  bundle_key: string | null;
   owner_steam_id64: string | null;
   status: "published" | "unpublished" | "archived";
   moderation_reason: string | null;
@@ -104,7 +107,8 @@ async function uploadRow(env: Env, uploadId: string, steamId64?: string): Promis
   const statement = env.DB.prepare(
     `SELECT id, steam_id64, status, expected_size_bytes, expected_sha256, quarantine_key,
             map_id, revision, error_code, error_message, expires_at,
-            validation_lease, validation_started_at
+            validation_lease, validation_started_at,
+            quota_state, quota_bytes_charged, quota_day_utc
        FROM map_uploads WHERE id = ?${ownerClause}`,
   );
   return steamId64 === undefined
@@ -306,7 +310,8 @@ export async function cancelUpload(
     throw new HttpError(409, "upload_not_cancellable", "The upload can no longer be cancelled.");
   }
   const changed = await env.DB.prepare(
-    `UPDATE map_uploads SET status = 'cancelled', completed_at = ?
+    `UPDATE map_uploads SET status = 'cancelled', completed_at = ?,
+                            quota_state = CASE WHEN quota_state = 'reserved' THEN 'none' ELSE quota_state END
       WHERE id = ? AND steam_id64 = ? AND status IN ('reserved', 'uploaded')`,
   ).bind(nowMs, row.id, row.steam_id64).run();
   if ((changed.meta.changes ?? 0) !== 1) {
@@ -380,6 +385,9 @@ async function isIdempotentRevision(
   nowMs: number,
 ): Promise<boolean> {
   if (incoming.bundleSha256 === existing.sha256) return true;
+  if (existing.sha256 === null || existing.bundle_key === null) {
+    throw new Error("the current approved bundle metadata is missing");
+  }
   const expectedKey = `approved/maps/${incoming.manifest.id}/r${existing.current_revision}/${existing.sha256}.ss2level`;
   if (existing.bundle_key !== expectedKey) throw new Error("the current approved bundle key is inconsistent");
   const object = await env.MAP_BUCKET.get(existing.bundle_key);
@@ -399,41 +407,59 @@ async function isIdempotentRevision(
 async function reserveStorageQuota(
   env: Env,
   config: RuntimeConfig,
+  uploadId: string,
   steamId64: string,
   bytes: number,
   nowMs: number,
 ): Promise<void> {
   const dayUtc = new Date(nowMs).toISOString().slice(0, 10);
-  const daily = await env.DB.prepare(
-    `UPDATE upload_usage_daily SET bytes_published = bytes_published + ?, updated_at = ?
-      WHERE steam_id64 = ? AND day_utc = ? AND bytes_published + ? <= ?
-      RETURNING bytes_published`,
-  ).bind(bytes, nowMs, steamId64, dayUtc, bytes, config.uploadDailyBytes).first<{ bytes_published: number }>();
-  if (daily === null) {
-    throw new UploadRejected(
-      "daily_upload_bytes_reached",
-      "This Steam account has published its daily storage allowance. Try again tomorrow.",
-    );
+  try {
+    const charged = await env.DB.prepare(
+      `UPDATE map_uploads
+          SET quota_state = 'reserved', quota_bytes_charged = ?, quota_day_utc = ?,
+              quota_daily_limit = ?, quota_retained_limit = ?, quota_charged_at = ?
+        WHERE id = ? AND steam_id64 = ? AND status = 'validating' AND quota_state = 'none'
+        RETURNING id`,
+    ).bind(
+      bytes,
+      dayUtc,
+      config.uploadDailyBytes,
+      config.retainedBytesPerAccount,
+      nowMs,
+      uploadId,
+      steamId64,
+    ).first<{ id: string }>();
+    if (charged !== null) return;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("daily_upload_bytes_reached")) {
+      throw new UploadRejected(
+        "daily_upload_bytes_reached",
+        "This Steam account has published its daily storage allowance. Try again tomorrow.",
+      );
+    }
+    if (message.includes("storage_quota_reached")) {
+      throw new UploadRejected(
+        "storage_quota_reached",
+        "This Steam account has reached its retained storage limit. Archive an old map to publish more.",
+      );
+    }
+    throw error;
   }
-  const retained = await env.DB.prepare(
-    `INSERT INTO account_storage (steam_id64, retained_bytes, updated_at)
-     VALUES (?, ?, ?)
-     ON CONFLICT(steam_id64) DO UPDATE SET
-       retained_bytes = account_storage.retained_bytes + excluded.retained_bytes,
-       updated_at = excluded.updated_at
-     WHERE account_storage.retained_bytes + excluded.retained_bytes <= ?
-     RETURNING retained_bytes`,
-  ).bind(steamId64, bytes, nowMs, config.retainedBytesPerAccount).first<{ retained_bytes: number }>();
-  if (retained === null) {
-    await env.DB.prepare(
-      `UPDATE upload_usage_daily SET bytes_published = MAX(0, bytes_published - ?), updated_at = ?
-        WHERE steam_id64 = ? AND day_utc = ?`,
-    ).bind(bytes, nowMs, steamId64, dayUtc).run();
-    throw new UploadRejected(
-      "storage_quota_reached",
-      "This Steam account has reached its retained storage limit. Delete an old map to publish more.",
-    );
-  }
+
+  const existing = await env.DB.prepare(
+    `SELECT quota_state, quota_bytes_charged, quota_day_utc
+       FROM map_uploads WHERE id = ? AND steam_id64 = ?`,
+  ).bind(uploadId, steamId64).first<{
+    quota_state: "none" | "reserved" | "published";
+    quota_bytes_charged: number;
+    quota_day_utc: string | null;
+  }>();
+  // The persisted reservation remains authoritative if a retry crosses UTC midnight. Requiring
+  // today's date here would strand an otherwise valid upload while leaving its original charge
+  // in place; the trigger already ensured that charge was admitted on its recorded day.
+  if (existing?.quota_state === "reserved" && existing.quota_bytes_charged === bytes) return;
+  throw new Error("the upload storage charge could not be reserved consistently");
 }
 
 /** Return released bytes to the account's retained footprint after revisions are collected. */
@@ -502,13 +528,26 @@ async function retireSupersededRevisions(
   await releaseStorageQuota(env, ownerSteamId64, released, nowMs);
 }
 
-async function rejectUpload(env: Env, row: UploadRow, code: string, message: string, nowMs: number): Promise<void> {
-  await env.MAP_BUCKET.delete(row.quarantine_key);
-  await env.DB.prepare(
+async function rejectUpload(
+  env: Env,
+  row: UploadRow,
+  validationLease: string,
+  code: string,
+  message: string,
+  nowMs: number,
+): Promise<void> {
+  const rejected = await env.DB.prepare(
     `UPDATE map_uploads
-        SET status = 'rejected', error_code = ?, error_message = ?, completed_at = ?
-      WHERE id = ? AND status IN ('uploaded', 'validating')`,
-  ).bind(code.slice(0, 64), message.slice(0, 512), nowMs, row.id).run();
+        SET status = 'rejected', error_code = ?, error_message = ?, completed_at = ?,
+            quota_state = CASE WHEN quota_state = 'reserved' THEN 'none' ELSE quota_state END,
+            validation_lease = NULL, validation_started_at = NULL, validation_lease_expires_at = NULL
+      WHERE id = ? AND status = 'validating' AND validation_lease = ?`,
+  ).bind(code.slice(0, 64), message.slice(0, 512), nowMs, row.id, validationLease).run();
+  // Only the validator that still owns the lease may remove the shared quarantine object. A stale
+  // validator can reach this function after a lease has been reclaimed and handed to a retry.
+  if ((rejected.meta.changes ?? 0) === 1) {
+    await env.MAP_BUCKET.delete(row.quarantine_key);
+  }
 }
 
 async function publishValidatedUpload(
@@ -549,12 +588,12 @@ async function publishValidatedUpload(
   const existing = await env.DB.prepare(
     `SELECT m.current_revision, m.owner_steam_id64, m.status, m.moderation_reason,
             v.creator_ids_json, v.sha256, v.bundle_key
-       FROM maps m JOIN map_versions v ON v.map_id = m.id AND v.revision = m.current_revision
+       FROM maps m LEFT JOIN map_versions v ON v.map_id = m.id AND v.revision = m.current_revision
       WHERE m.id = ?`,
   ).bind(inspected.manifest.id).first<ExistingMapRow>();
   if (existing !== null) {
     if ((existing.owner_steam_id64 !== null && existing.owner_steam_id64 !== row.steam_id64) ||
-        (existing.owner_steam_id64 === null && !creatorArray(existing.creator_ids_json).includes(uploaderPlayerId))) {
+        (existing.owner_steam_id64 === null && !creatorArray(existing.creator_ids_json ?? "[]").includes(uploaderPlayerId))) {
       throw new UploadRejected("map_owner_mismatch", "This Steam user does not own the existing community map.");
     }
     if (existing.moderation_reason !== null) {
@@ -564,7 +603,8 @@ async function publishValidatedUpload(
       );
     }
     if (revision <= existing.current_revision) {
-      if (revision === existing.current_revision &&
+      if (existing.status !== "archived" && existing.sha256 !== null && existing.bundle_key !== null &&
+          revision === existing.current_revision &&
           await isIdempotentRevision(env, existing, inspected, nowMs)) {
         // The moderation check above is a read; a maintainer can take the map down between that
         // read and this write. Re-assert it as a compare-and-swap so a takedown always wins, and
@@ -603,9 +643,9 @@ async function publishValidatedUpload(
       throw new UploadRejected("revision_not_newer", "Save the level again before uploading a new revision.");
     }
   }
-  if (existing === null) {
+  if (existing === null || existing.status === "archived") {
     const owned = await env.DB.prepare(
-      `SELECT COUNT(*) AS count FROM maps WHERE owner_steam_id64 = ?`,
+      `SELECT COUNT(*) AS count FROM maps WHERE owner_steam_id64 = ? AND status != 'archived'`,
     ).bind(row.steam_id64).first<{ count: number }>();
     if (owned === null || !Number.isSafeInteger(owned.count)) {
       throw new Error("the map ownership quota could not be checked");
@@ -616,7 +656,7 @@ async function publishValidatedUpload(
   }
 
   const thumbnailBytes = inspected.thumbnail?.length ?? 0;
-  await reserveStorageQuota(env, config, row.steam_id64, bytes.length + thumbnailBytes, nowMs);
+  await reserveStorageQuota(env, config, row.id, row.steam_id64, bytes.length + thumbnailBytes, nowMs);
 
   const bundleKey = `approved/maps/${inspected.manifest.id}/r${revision}/${inspected.bundleSha256}.ss2level`;
   const bundleObject = await env.MAP_BUCKET.put(bundleKey, bytes, {
@@ -677,14 +717,14 @@ async function publishValidatedUpload(
          (id, status, current_revision, title, title_sort, description, created_at_ms, updated_at_ms,
           owner_steam_id64, unpublished_at_ms, archived_at_ms, moderation_reason)
        SELECT ?, 'published', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL
-        WHERE EXISTS (SELECT 1 FROM maps WHERE id = ?)
-           OR (SELECT COUNT(*) FROM maps WHERE owner_steam_id64 = ?) < ?
+        WHERE EXISTS (SELECT 1 FROM maps WHERE id = ? AND status != 'archived')
+           OR (SELECT COUNT(*) FROM maps WHERE owner_steam_id64 = ? AND status != 'archived') < ?
        ON CONFLICT(id) DO UPDATE SET
          status = 'published', current_revision = excluded.current_revision,
          title = excluded.title, title_sort = excluded.title_sort,
          description = excluded.description, updated_at_ms = excluded.updated_at_ms
          , owner_steam_id64 = COALESCE(maps.owner_steam_id64, excluded.owner_steam_id64)
-         , unpublished_at_ms = NULL, archived_at_ms = NULL
+         , unpublished_at_ms = NULL, archived_at_ms = NULL, archive_operation_id = NULL
        WHERE maps.current_revision < excluded.current_revision
          AND (maps.owner_steam_id64 = excluded.owner_steam_id64 OR maps.owner_steam_id64 IS NULL)
          AND maps.moderation_reason IS NULL`,
@@ -741,7 +781,8 @@ async function publishValidatedUpload(
                      AND m.current_revision = map_versions.revision)`,
   ).bind(manifest.id, revision));
   statements.push(env.DB.prepare(
-    `UPDATE map_uploads SET status = 'published', map_id = ?, revision = ?, completed_at = ?
+    `UPDATE map_uploads SET status = 'published', map_id = ?, revision = ?, completed_at = ?,
+                            quota_state = CASE WHEN quota_state = 'reserved' THEN 'published' ELSE quota_state END
       WHERE id = ? AND status = 'validating' AND validation_lease = ?
         AND EXISTS (SELECT 1 FROM map_versions v WHERE v.map_id = ? AND v.revision = ?
                      AND v.status = 'published')`,
@@ -772,7 +813,7 @@ async function publishValidatedUpload(
     if (existing === null) {
       const [map, owned] = await Promise.all([
         env.DB.prepare(`SELECT id FROM maps WHERE id = ?`).bind(manifest.id).first<{ id: string }>(),
-        env.DB.prepare(`SELECT COUNT(*) AS count FROM maps WHERE owner_steam_id64 = ?`)
+        env.DB.prepare(`SELECT COUNT(*) AS count FROM maps WHERE owner_steam_id64 = ? AND status != 'archived'`)
           .bind(row.steam_id64).first<{ count: number }>(),
       ]);
       if (map === null && owned !== null && owned.count >= config.mapsPerAccountLimit) {
@@ -795,7 +836,10 @@ export async function validateUploadMessage(env: Env, value: unknown, nowMs = Da
   if (row.expires_at <= nowMs) {
     await env.MAP_BUCKET.delete(row.quarantine_key);
     await env.DB.prepare(
-      `UPDATE map_uploads SET status = 'expired', completed_at = ?
+      `UPDATE map_uploads SET status = 'expired', completed_at = ?,
+                              quota_state = CASE WHEN quota_state = 'reserved' THEN 'none' ELSE quota_state END,
+                              validation_lease = NULL, validation_started_at = NULL,
+                              validation_lease_expires_at = NULL
         WHERE id = ? AND status IN ('uploaded', 'validating')`,
     ).bind(nowMs, row.id).run();
     return;
@@ -813,11 +857,11 @@ export async function validateUploadMessage(env: Env, value: unknown, nowMs = Da
     await publishValidatedUpload(env, runtimeConfig(env), row, validationLease, nowMs);
   } catch (error) {
     if (error instanceof BundleValidationError) {
-      await rejectUpload(env, row, error.code, error.message, nowMs);
+      await rejectUpload(env, row, validationLease, error.code, error.message, nowMs);
       return;
     }
     if (error instanceof UploadRejected) {
-      await rejectUpload(env, row, error.code, error.message, nowMs);
+      await rejectUpload(env, row, validationLease, error.code, error.message, nowMs);
       return;
     }
     await env.DB.prepare(

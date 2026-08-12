@@ -1,8 +1,7 @@
-// Wrangler generates the platform bindings in worker-configuration.d.ts. These bindings exist
-// only in Vitest/Miniflare or as Worker secrets, so they cannot be inferred from wrangler.jsonc.
+// Wrangler generates the deployed bindings from the local and production-example configs. These
+// two bindings exist only in Vitest/Miniflare, so they cannot be inferred from either config.
 interface TestOnlyBindings {
   LOCAL_AUTH_SECRET: string;
-  AUTH_SIGNING_SECRET: string;
   TEST_MIGRATIONS: D1Migration[];
 }
 

@@ -31,9 +31,8 @@ namespace SS2Revive
         private const string LogoutButtonName = "SS2ReviveCommunityLogoutButton";
 
         /// <summary>
-        /// The Create screen currently open, so the Import button can redraw it. The button's
-        /// handler is static - it is a delegate on a cloned GameObject, not a component of ours -
-        /// and there is only ever one of these screens.
+        /// The Create screen currently open, so an automatic import or a completed publication can
+        /// redraw it. There is only ever one of these screens.
         /// </summary>
         private static TerminalCreateScreen _screen;
         private static TerminalLevelModalController _publishModal;
@@ -199,7 +198,8 @@ namespace SS2Revive
                 ?.GetValue(modal) as bool? ?? false;
             var localPlayer = Shell.Instance.GetLocalPlayerService().GetPlayerId(0);
             var ownsLevel = summary.creatorPlayerIds != null && summary.creatorPlayerIds.Contains(localPlayer);
-            var visible = Plugin.LevelSharingEnabled.Value && inCreateMode && ownsLevel
+            var visible = Plugin.LevelSharingEnabled.Value && CommunityPublishClient.Enabled
+                          && inCreateMode && ownsLevel
                           && !UgcBackend.IsImported(summary.serverLevelId)
                           && !string.IsNullOrEmpty(summary.serverLevelId);
             SetLabel(button, "PUBLISH");
@@ -302,32 +302,6 @@ namespace SS2Revive
                 Plugin.Log.LogError("Scanning the import folder threw: " + ex);
             }
 
-        }
-
-        private static void OnImportClicked(ExtendedButton button)
-        {
-            try
-            {
-                var result = LevelSharing.ImportAll();
-                TerminalMessage.Show(LevelSharing.Describe(result, sayNothingHappened: true),
-                                     isWarning: result.Added == 0 && result.Rejected > 0);
-
-                // The screen is listing a search that ran before any of this arrived, so it is
-                // redrawn rather than left to look as though nothing happened. It is also the
-                // refresh half of this button: pressing it after dropping a file in re-runs the
-                // search whether or not there was anything new to take in.
-                Refresh(_screen);
-
-                // Only when the folder was empty, and only on a deliberate press. Somebody who has
-                // just been told to put files somewhere needs to be shown where that is; somebody
-                // who already has files there does not want their game minimised.
-                if (result.Seen == 0) OpenImportFolder();
-            }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogError("Import threw: " + ex);
-                TerminalMessage.Show("Import failed. See the log.", isWarning: true);
-            }
         }
 
         /// <summary>
@@ -479,20 +453,6 @@ namespace SS2Revive
             }
             TerminalMessage.Show(string.IsNullOrEmpty(warning) ? success : warning,
                                  !string.IsNullOrEmpty(warning));
-        }
-
-        private static void OpenImportFolder()
-        {
-            if (LevelSharing.ImportDirectory == null) return;
-
-            try
-            {
-                Application.OpenURL("file:///" + LevelSharing.ImportDirectory.Replace('\\', '/'));
-            }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogWarning("Could not open the import folder: " + ex.Message);
-            }
         }
 
         private static void OpenExportFolder()

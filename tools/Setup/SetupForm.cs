@@ -11,13 +11,16 @@ internal sealed class SetupForm : Form
     private readonly TextBox _steamUsername = new();
     private readonly Label _progressStatus = new();
     private readonly TextBox _progressLog = new();
+    private readonly Label _completionTitle = new();
     private readonly Label _completionSummary = new();
+    private readonly Label _completionInstructions = new();
     private readonly Button _installButton = new();
     private readonly Button _launchButton = new();
     private readonly Button _openFolderButton = new();
     private CancellationTokenSource? _cancellation;
     private InstallerEngine.InstallResult? _result;
     private bool _installing;
+    private bool _closeAfterCancellation;
 
     internal SetupForm()
     {
@@ -154,9 +157,11 @@ internal sealed class SetupForm : Form
 
     private void BuildCompletePage()
     {
-        var title = TitleLabel("Installation complete");
-        title.Location = new Point(32, 24);
-        _completePage.Controls.Add(title);
+        _completionTitle.Text = "Installation complete";
+        _completionTitle.AutoSize = true;
+        _completionTitle.Font = new Font("Segoe UI Semibold", 20f, FontStyle.Bold);
+        _completionTitle.Location = new Point(32, 24);
+        _completePage.Controls.Add(_completionTitle);
 
         _completionSummary.AutoSize = false;
         _completionSummary.Location = new Point(35, 82);
@@ -164,14 +169,10 @@ internal sealed class SetupForm : Form
         _completionSummary.Font = new Font(Font.FontFamily, 10.5f);
         _completePage.Controls.Add(_completionSummary);
 
-        var instructions = new Label
-        {
-            AutoSize = false,
-            Location = new Point(35, 322),
-            Size = new Size(650, 56),
-            Text = "Keep Steam running and signed in. Use the generated launcher—not the normal Steam Play button—to start build 1.3.7.",
-        };
-        _completePage.Controls.Add(instructions);
+        _completionInstructions.AutoSize = false;
+        _completionInstructions.Location = new Point(35, 322);
+        _completionInstructions.Size = new Size(650, 56);
+        _completePage.Controls.Add(_completionInstructions);
 
         _openFolderButton.Text = "Open folder";
         _openFolderButton.Location = new Point(241, 391);
@@ -231,37 +232,50 @@ internal sealed class SetupForm : Form
         }
         catch (OperationCanceledException)
         {
-            MessageBox.Show(this, "Installation was cancelled. You can run Setup again to resume and validate the download.",
-                "Cancelled", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            _progressPage.Visible = false;
-            _startPage.Visible = true;
-            _startPage.BringToFront();
+            if (!_closeAfterCancellation)
+            {
+                MessageBox.Show(this, "Installation was cancelled. You can run Setup again to resume and validate the download.",
+                    "Cancelled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                _progressPage.Visible = false;
+                _startPage.Visible = true;
+                _startPage.BringToFront();
+            }
         }
         catch (Exception exception)
         {
-            MessageBox.Show(this, exception.Message, "Installation failed",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
-            _progressPage.Visible = false;
-            _startPage.Visible = true;
-            _startPage.BringToFront();
+            if (!_closeAfterCancellation)
+            {
+                MessageBox.Show(this, exception.Message, "Installation failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                _progressPage.Visible = false;
+                _startPage.Visible = true;
+                _startPage.BringToFront();
+            }
         }
         finally
         {
             _installing = false;
             _cancellation.Dispose();
             _cancellation = null;
+            if (_closeAfterCancellation && !IsDisposed) Close();
         }
     }
 
     private void ShowCompletion(InstallerEngine.InstallResult result)
     {
+        _completionTitle.Text = result.ModInstalled
+            ? "Installation complete"
+            : "Setup incomplete";
         _completionSummary.Text =
             $"Installed to:\r\n{result.InstallDirectory}\r\n\r\n" +
             $"Launcher:\r\n{result.LauncherPath}\r\n\r\n" +
             (result.ModInstalled
                 ? $"SS2 Revive mod: Installed successfully ({result.ModVersion})"
                 : $"SS2 Revive mod: Not installed automatically\r\n{result.ModError}");
-        _launchButton.Enabled = File.Exists(result.LauncherPath);
+        _completionInstructions.Text = result.ModInstalled
+            ? "Keep Steam running and signed in. Use the generated launcher—not the normal Steam Play button—to start build 1.3.7."
+            : "The game and BepInEx are ready, but the mod still needs to be installed. Open the folder and follow the manual installation steps in the SS2 Revive README, then use the generated launcher.";
+        _launchButton.Enabled = result.ModInstalled && File.Exists(result.LauncherPath);
         _openFolderButton.Enabled = Directory.Exists(result.InstallDirectory);
         _progressPage.Visible = false;
         _completePage.Visible = true;
@@ -284,6 +298,11 @@ internal sealed class SetupForm : Form
     private void OnFormClosing(object? sender, FormClosingEventArgs eventArgs)
     {
         if (!_installing) return;
+        if (_closeAfterCancellation)
+        {
+            eventArgs.Cancel = true;
+            return;
+        }
         var result = MessageBox.Show(this, "Cancel the installation and close Setup?",
             "Installation running", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
         if (result != DialogResult.Yes)
@@ -291,7 +310,10 @@ internal sealed class SetupForm : Form
             eventArgs.Cancel = true;
             return;
         }
+        _closeAfterCancellation = true;
+        _progressStatus.Text = "Cancelling installation…";
         _cancellation?.Cancel();
+        eventArgs.Cancel = true;
     }
 
     private static void OpenPath(string? path)

@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Text;
 using Audio.Voip;
 using HarmonyLib;
+using Services;
 using Steamworks;
 using UnityEngine;
 
@@ -22,6 +23,9 @@ namespace SS2Revive
 
         private static readonly FieldInfo ReceiveMutedField =
             AccessTools.Field(typeof(VOIPProvider), "_voiceReceiveMuted");
+
+        private static readonly FieldInfo SidecarVivoxField =
+            AccessTools.Field(typeof(VivoxTextChatProviderSidecar), "_vivox");
 
         internal static void Apply(Harmony harmony)
         {
@@ -47,6 +51,21 @@ namespace SS2Revive
             // normal lifecycle, but a later game call must still never expose the retired tenant's
             // client-side signing material or contact Vivox.
             AddPatch(patches, "Login", nameof(Login_Prefix));
+
+            var sendTarget = AccessTools.Method(typeof(VivoxTextChatProviderSidecar),
+                "RequestSendMessage", new[] { typeof(TextChatChannelType), typeof(string) });
+            var sendPrefix = AccessTools.Method(typeof(SteamVoiceChatPatches),
+                nameof(RequestSendMessage_Prefix));
+            if (sendTarget == null)
+                throw new MissingMethodException(typeof(VivoxTextChatProviderSidecar).FullName,
+                    "RequestSendMessage");
+            if (sendPrefix == null)
+                throw new MissingMethodException(typeof(SteamVoiceChatPatches).FullName,
+                    nameof(RequestSendMessage_Prefix));
+            if (SidecarVivoxField == null)
+                throw new MissingFieldException(typeof(VivoxTextChatProviderSidecar).FullName,
+                    "_vivox");
+            patches.Add(new KeyValuePair<MethodInfo, MethodInfo>(sendTarget, sendPrefix));
 
             // Validate every inferred signature before applying the first prefix. A partial facade
             // is worse than no facade: one original Vivox method mixed with Steam state could log
@@ -116,6 +135,14 @@ namespace SS2Revive
         private static bool SendMessage_Prefix(VivoxPlatform __instance, string message)
         {
             SteamVoiceChat.SendText(__instance, message);
+            return false;
+        }
+
+        private static bool RequestSendMessage_Prefix(VivoxTextChatProviderSidecar __instance,
+            string message)
+        {
+            var provider = SidecarVivoxField.GetValue(__instance) as VivoxPlatform;
+            SteamVoiceChat.SendTextWithFeedback(__instance, provider, message);
             return false;
         }
 
@@ -542,6 +569,53 @@ namespace SS2Revive
             }
         }
 
+        /// <summary>
+        /// The stock sidecar displays local chat unconditionally after calling Vivox.SendMessage,
+        /// whose return type cannot report failure. Steam can report a failed send, so keep the UI
+        /// honest: only publish MessageSent after Steam accepts the message and use the provider's
+        /// existing blocked-message path for validation, restriction, and transport failures.
+        /// </summary>
+        internal static void SendTextWithFeedback(VivoxTextChatProviderSidecar sidecar,
+            VivoxPlatform provider, string message)
+        {
+            message = message ?? string.Empty;
+            if (!SendText(provider, message))
+            {
+                try
+                {
+                    sidecar?.MessageBlocked?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning("Reporting party chat failure failed: " + ex.Message);
+                }
+                return;
+            }
+
+            var playerId = _myUid;
+            if (string.IsNullOrEmpty(playerId) && provider != null)
+                playerId = provider.MyUID;
+
+            var displayName = _displayName;
+            if (string.IsNullOrEmpty(displayName) && provider?.ParticipantByPlayerUID != null
+                && !string.IsNullOrEmpty(playerId)
+                && provider.ParticipantByPlayerUID.TryGetValue(playerId, out var playerInfo))
+                displayName = playerInfo.displayName;
+            if (string.IsNullOrEmpty(displayName))
+                displayName = SteamIdentity.GetPersonaName(SteamIdentity.GetSteamId64());
+            if (string.IsNullOrEmpty(displayName))
+                displayName = "Steam Player";
+
+            try
+            {
+                sidecar?.MessageSent?.Invoke(displayName, playerId ?? string.Empty, message);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("Reporting sent party chat failed: " + ex.Message);
+            }
+        }
+
         private static void OnLobbyChatMessage(LobbyChatMsg_t callback)
         {
             if (_provider == null || !PartyBackend.InLobby
@@ -855,11 +929,15 @@ namespace SS2Revive
 
                     if (size > VoiceReceiveBuffer.Length)
                     {
-                        // Steam's legacy P2P maximum is bounded by the fixed drain buffer. A packet
-                        // beyond it cannot be valid voice; stop this frame rather than allocate from
-                        // attacker-controlled input.
+                        // Read into the fixed buffer to remove this invalid packet from Steam's
+                        // queue. Steam truncates an undersized read, so this drains attacker-sized
+                        // input without allocating from its declared size and lets later voice
+                        // packets proceed.
+                        if (!SteamNetworking.ReadP2PPacket(VoiceReceiveBuffer,
+                                (uint)VoiceReceiveBuffer.Length, out _, out _, VoiceChannel))
+                            break;
                         _rejectedVoicePackets++;
-                        break;
+                        continue;
                     }
 
                     if (!SteamNetworking.ReadP2PPacket(VoiceReceiveBuffer,

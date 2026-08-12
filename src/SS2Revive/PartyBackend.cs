@@ -107,6 +107,7 @@ namespace SS2Revive
 
         internal static void Initialise()
         {
+            DisposeSteamCallbacks();
             _lobbyCreated = CallResult<LobbyCreated_t>.Create(OnLobbyCreated);
             _lobbyEnter = CallResult<LobbyEnter_t>.Create(OnLobbyEnter);
             _lobbyChatUpdate = Callback<LobbyChatUpdate_t>.Create(OnLobbyChatUpdate);
@@ -120,6 +121,43 @@ namespace SS2Revive
             _lobbyJoinRequested = Callback<GameLobbyJoinRequested_t>.Create(OnLobbyJoinRequested);
 
             Plugin.Log.LogInfo("Party backend ready (Steam lobby).");
+        }
+
+        private static void DisposeSteamCallbacks()
+        {
+            _lobbyChatUpdate?.Dispose();
+            _lobbyChatUpdate = null;
+            _lobbyDataUpdate?.Dispose();
+            _lobbyDataUpdate = null;
+            _lobbyJoinRequested?.Dispose();
+            _lobbyJoinRequested = null;
+            _lobbyCreated?.Dispose();
+            _lobbyCreated = null;
+            _lobbyEnter?.Dispose();
+            _lobbyEnter = null;
+        }
+
+        internal static void Shutdown()
+        {
+            if (InLobby)
+            {
+                try
+                {
+                    if (SteamIdentity.IsSteamReady())
+                        SteamMatchmaking.LeaveLobby(_lobby);
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning("Leaving Steam lobby during shutdown failed: "
+                                          + ex.Message);
+                }
+            }
+
+            DisposeSteamCallbacks();
+            Waiting.Clear();
+            _joinTarget = 0UL;
+            _lobby = CSteamID.Nil;
+            _locked = false;
         }
 
         /// <summary>Connect string Steam should hand a joiner - the party id, as Bossa encodes it.</summary>
@@ -400,12 +438,9 @@ namespace SS2Revive
         /// <summary>
         /// Drops every piece of state that was only true while we were in that lobby.
         ///
-        /// The transport reset is the part that matters. Its peer table is what decides whether a
-        /// synthetic endpoint gets translated into a Steam message, and it is only ever added to -
-        /// so without this, everyone from every party this session stays addressable for the rest
-        /// of it. Packets aimed at someone who left would keep going out over Steam instead of
-        /// falling through to the original UDP path, and the queues would still be holding their
-        /// traffic.
+        /// The transport reset is the part that matters. Its peer table decides whether a synthetic
+        /// endpoint is translated into a Steam message; clearing it here closes every session and
+        /// purges traffic that belonged to the lobby we just left.
         /// </summary>
         private static void ForgetLobby()
         {
@@ -450,6 +485,7 @@ namespace SS2Revive
             _locked = false;
             SteamVoiceChat.NotifyLobbyChanged();
             PublishLobbyState();
+            RegisterLobbyPeers();
 
             Plugin.Log.LogInfo("Lobby created: " + _lobby.m_SteamID
                                + " (party id " + EncodeLobby(_lobby.m_SteamID) + ")");
@@ -588,6 +624,8 @@ namespace SS2Revive
                     if (id != 0UL)
                         members.Add(id);
                 }
+
+                SteamTransport.SynchronizePeers(members);
             }
             catch (Exception ex)
             {
@@ -598,9 +636,9 @@ namespace SS2Revive
         }
 
         /// <summary>
-        /// Makes every current lobby member addressable immediately, rather than whenever the party
-        /// JSON next happens to be built. The two are usually seconds apart, and a peer that starts
-        /// sending inside that gap is refused and never retries.
+        /// Makes the transport's authorization set exactly match the current lobby, rather than
+        /// only adding members. A departure therefore closes its session and purges queued traffic
+        /// immediately instead of leaving the former member addressable until the whole lobby ends.
         /// </summary>
         private static void RegisterLobbyPeers()
         {
@@ -609,13 +647,19 @@ namespace SS2Revive
 
             try
             {
+                var members = new List<ulong>(MaxMembers);
                 var count = SteamMatchmaking.GetNumLobbyMembers(_lobby);
-                for (var i = 0; i < count; i++)
-                    SteamTransport.RegisterPeer(SteamMatchmaking.GetLobbyMemberByIndex(_lobby, i).m_SteamID);
+                for (var i = 0; i < count && i < MaxMembers; i++)
+                {
+                    var id = SteamMatchmaking.GetLobbyMemberByIndex(_lobby, i).m_SteamID;
+                    if (id != 0UL)
+                        members.Add(id);
+                }
+                SteamTransport.SynchronizePeers(members);
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("Registering lobby peers failed: " + ex.Message);
+                Plugin.Log.LogWarning("Synchronizing lobby peers failed: " + ex.Message);
             }
         }
 
@@ -719,6 +763,8 @@ namespace SS2Revive
             var count = SteamMatchmaking.GetNumLobbyMembers(_lobby);
             for (var i = 0; i < count; i++)
                 members.Add(SteamMatchmaking.GetLobbyMemberByIndex(_lobby, i).m_SteamID);
+
+            SteamTransport.SynchronizePeers(members);
 
             var owner = SteamMatchmaking.GetLobbyOwner(_lobby).m_SteamID;
             members.Sort((a, b) =>

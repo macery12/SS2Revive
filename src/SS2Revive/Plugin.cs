@@ -133,8 +133,8 @@ namespace SS2Revive
                 + "folder each. Saved levels can be published to the restored community browser "
                 + "after Steam authentication.");
             LevelSharingEnabled = Config.Bind("CreationMode", "LevelSharing", true,
-                "Turn the terminal's Share button into an Export button, and add an Import button "
-                + "to the Create screen. Export writes the level to one .ss2level file and copies "
+                "Turn the terminal's Share button into an Export button and scan the import folder "
+                + "when the Create screen opens. Export writes the level to one .ss2level file and copies "
                 + "the game's own 22-character share code to the clipboard; import reads any "
                 + ".ss2level file left in the import folder. Both folders sit beside your saves, in "
                 + "the SS2Revive folder. Send the file however you like and post the code with it - "
@@ -302,6 +302,7 @@ namespace SS2Revive
             // out is the one ordering here that could bite.
             // Qualified, because this class has a config field of the same name.
             SS2Revive.SteamVoiceChat.Shutdown();
+            SS2Revive.PartyBackend.Shutdown();
             SS2Revive.SteamTransport.Shutdown();
             _harmony?.UnpatchSelf();
         }

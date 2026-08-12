@@ -23,6 +23,11 @@ namespace SS2Revive
 
         private void Update()
         {
+            if (!CommunityCatalogClient.Enabled)
+            {
+                _shown = true;
+                return;
+            }
             if (_shown || !IsInLobby()) return;
 
             if (!_requested)
@@ -36,8 +41,8 @@ namespace SS2Revive
 
             _shown = true;
             TerminalMessage.Show(_connected.Value
-                    ? "Connected to UGC."
-                    : "Not connected to UGC.",
+                    ? "Connected to the community service."
+                    : "The community service is unavailable. Cached and local maps remain available.",
                 isWarning: !_connected.Value,
                 seconds: 5f);
         }
