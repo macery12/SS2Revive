@@ -32,8 +32,8 @@ body:
     attributes:
       label: SS2 Revive version
       description: >-
-        The first SS2 Revive line in the log says it: `SS2 Revive 1.2.0 starting.`
-      placeholder: "1.2.0"
+        The first SS2 Revive line in the log says it: `SS2 Revive 1.2.1 starting.`
+      placeholder: "1.2.1"
     validations:
       required: true
 
