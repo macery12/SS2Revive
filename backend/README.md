@@ -65,4 +65,4 @@ bindings, secrets, migrations, and deployment remain maintainer-managed.
   an obscure URL.
 
 Do not commit `.dev.vars`, production Wrangler configuration, Cloudflare state, tokens, or game
-assets. See the repository [license](../LICENSE) and [security reporting guidance](../README.md#troubleshooting-and-bug-reports).
+assets. See the repository [license](../LICENSE) and [security reporting guidance](../README.md#report-a-security-issue).
