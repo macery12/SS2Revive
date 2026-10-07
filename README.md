@@ -6,7 +6,7 @@ The mod answers the retired service calls locally, carries multiplayer traffic o
 
 | | |
 |---|---|
-| **Current release** | 1.2.1 — [download the installer](https://github.com/macery12/SS2Revive/releases/latest) |
+| **Current release** | 1.2.2 — [download the installer](https://github.com/macery12/SS2Revive/releases/latest) |
 | **Supported game build** | Surgeon Simulator 2 **1.3.7.3054** |
 | **Platform** | Windows x64, with Steam running |
 | **Not supported** | Game version 1.5.x, which removed the networking implementation this project restores |
@@ -69,7 +69,7 @@ The x86 BepInEx build installs without reporting an error, but it will never loa
 Launch the game, then open `Surgeon Simulator 2\BepInEx\LogOutput.log` and look for a line like:
 
 ```text
-[Info   :SS2 Revive] SS2 Revive 1.2.1 starting.
+[Info   :SS2 Revive] SS2 Revive 1.2.2 starting.
 ```
 
 If no such line appears, the mod did not load. See [Troubleshooting](#troubleshooting).
