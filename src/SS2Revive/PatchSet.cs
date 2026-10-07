@@ -71,6 +71,11 @@ namespace SS2Revive
                 ApplySteamTransport(harmony);
             }
 
+            // Not tied to the transport: the message limit and the replayed actions are the game's
+            // own protocol, whatever carries it.
+            if (Plugin.PatientSyncFix.Value)
+                PatientSync.Apply(harmony);
+
             // The transition screen is patched for two unrelated reasons - matchmaking that can
             // never arrive, and a creator-mode party that can never be joined - so it goes in
             // whenever either of those is being handled. The prefix checks both settings itself.

@@ -47,12 +47,20 @@ export async function cachedObjectBody(
 export async function withEdgeCache(
   request: Request,
   ctx: ExecutionContext,
+  requestId: string,
   handler: () => Promise<Response>,
 ): Promise<Response> {
   if (!isCacheable(request)) return handler();
   const key = cacheKey(new URL(request.url).toString());
   const hit = await edgeCache.match(key);
-  if (hit !== undefined) return hit;
+  if (hit !== undefined) {
+    // Cache API responses have immutable headers, and the fetch handler still stamps HSTS on every
+    // production response. Copy the hit so it is mutable and reports this request's id, not the
+    // id of the request that filled the cache.
+    const response = new Response(hit.body, hit);
+    response.headers.set("X-Request-Id", requestId);
+    return response;
+  }
   const response = await handler();
   if (response.status === 200 && (response.headers.get("Cache-Control") ?? "").includes("public")) {
     ctx.waitUntil(edgeCache.put(key, response.clone()));

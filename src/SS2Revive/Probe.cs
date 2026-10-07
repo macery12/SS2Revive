@@ -227,6 +227,8 @@ namespace SS2Revive
                 return;
             }
 
+            Line(sb, "Patient sync", () => PatientSync.Describe(service));
+
             var approved = ApprovedPatientStates(service);
             var list = patients.PatientList;
             if (list == null || list.Count == 0)

@@ -78,6 +78,7 @@ namespace SS2Revive
         internal static ConfigEntry<bool> NewsFeedEnabled;
         internal static ConfigEntry<string> NewsFeedUrl;
         internal static ConfigEntry<bool> SteamTransport;
+        internal static ConfigEntry<bool> PatientSyncFix;
         internal static ConfigEntry<KeyCode> InviteKey;
         internal static ConfigEntry<bool> ShareLevel;
         internal static ConfigEntry<bool> VerboseProbe;
@@ -197,6 +198,13 @@ namespace SS2Revive
             SteamTransport = Config.Bind("Party", "SteamP2PTransport", true,
                 "Carry peer-to-peer game traffic over Steam. Bossa's STUN and TURN servers are gone, "
                 + "so direct UDP cannot get through NAT without them.");
+            PatientSyncFix = Config.Bind("Party", "PatientSyncFix", true,
+                "Keep Bob's blood, organs and limbs in sync once surgery gets busy. The game never "
+                + "splits its patient messages, and one over 1200 bytes is silently never sent, "
+                + "which froze clients on a stale Bob (no blood loss shown, organs not replaced) "
+                + "for the rest of the level. Also stops the host applying a client's cut twice "
+                + "when its acknowledgement arrives late. Everyone in the party should run it; "
+                + "it matters most on the host. Leave this on.");
             InviteKey = Config.Bind("Party", "InviteKey", KeyCode.F10,
                 "Press to open the Steam overlay invite dialog for the current party lobby.");
             ShareLevel = Config.Bind("Party", "ShareLevelOverSteam", true,

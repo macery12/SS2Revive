@@ -295,6 +295,30 @@ describe("Phase 0 Worker", () => {
     expect(seeded.status).toBe(404);
   });
 
+  it("serves catalog edge-cache hits in production without touching immutable headers", async () => {
+    const productionEnv: Env = {
+      ...env,
+      ENVIRONMENT: "production",
+      PUBLIC_ORIGIN: "https://community.m12labs.net",
+    };
+    const pending: Promise<unknown>[] = [];
+    const context = {
+      ...testContext,
+      waitUntil(promise: Promise<unknown>): void {
+        pending.push(promise);
+      },
+    } as unknown as ExecutionContext;
+    const url = "https://community.m12labs.net/v1/catalog";
+    const first = await worker.fetch(new Request(url), productionEnv, context);
+    expect(first.status).toBe(200);
+    await Promise.all(pending);
+    const cached = await worker.fetch(new Request(url), productionEnv, context);
+    expect(cached.status).toBe(200);
+    expect(cached.headers.get("Strict-Transport-Security")).toContain("max-age=");
+    expect(cached.headers.get("X-Request-Id")).not.toBe(first.headers.get("X-Request-Id"));
+    expect((await json<{ schemaVersion: number }>(cached)).schemaVersion).toBe(1);
+  });
+
   it("never exposes mock routes on a public origin even with local flags", async () => {
     const activation = await worker.fetch(new Request("https://community.m12labs.net/activate"), env, testContext);
     expect(activation.status).toBe(421);

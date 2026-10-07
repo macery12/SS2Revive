@@ -6,7 +6,7 @@ The mod answers the retired service calls locally, carries multiplayer traffic o
 
 | | |
 |---|---|
-| **Current release** | 1.2.1 — [download the installer](https://github.com/macery12/SS2Revive/releases/latest) |
+| **Current release** | 1.2.2 — [download the installer](https://github.com/macery12/SS2Revive/releases/latest) |
 | **Supported game build** | Surgeon Simulator 2 **1.3.7.3054** |
 | **Platform** | Windows x64, with Steam running |
 | **Not supported** | Game version 1.5.x, which removed the networking implementation this project restores |
@@ -45,10 +45,10 @@ You need Windows x64, a Steam account that owns Surgeon Simulator 2, and Steam r
 
 1. Download `SS2Revive-Setup-<version>.exe` from the [latest release](https://github.com/macery12/SS2Revive/releases/latest), then run it.
 2. Choose an installation folder and enter the Steam login name of an account that owns the game.
-3. Complete the password and Steam Guard prompts in DepotDownloader's own window.
+3. Complete the password and Steam Guard prompts in the **Steam sign-in** window Setup opens.
 4. Start the game with the `Launch Surgeon Simulator 2 - 1.3.7.cmd` launcher Setup creates in that folder.
 
-Setup installs the supported game build, x64 BepInEx, and the latest SS2 Revive release. DepotDownloader handles Steam credentials in its own window; SS2 Revive Setup never reads or stores them.
+Setup installs the supported game build, x64 BepInEx, and the latest SS2 Revive release. You type your password and Steam Guard code straight into DepotDownloader in that window; SS2 Revive Setup never reads or stores them. If the download fails, Setup explains the likely cause and points to a diagnostic log of DepotDownloader's output.
 
 The setup executable is currently unsigned, so Windows may show a SmartScreen warning.
 
@@ -69,7 +69,7 @@ The x86 BepInEx build installs without reporting an error, but it will never loa
 Launch the game, then open `Surgeon Simulator 2\BepInEx\LogOutput.log` and look for a line like:
 
 ```text
-[Info   :SS2 Revive] SS2 Revive 1.2.1 starting.
+[Info   :SS2 Revive] SS2 Revive 1.2.2 starting.
 ```
 
 If no such line appears, the mod did not load. See [Troubleshooting](#troubleshooting).
