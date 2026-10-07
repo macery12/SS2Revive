@@ -45,10 +45,10 @@ You need Windows x64, a Steam account that owns Surgeon Simulator 2, and Steam r
 
 1. Download `SS2Revive-Setup-<version>.exe` from the [latest release](https://github.com/macery12/SS2Revive/releases/latest), then run it.
 2. Choose an installation folder and enter the Steam login name of an account that owns the game.
-3. Complete the password and Steam Guard prompts in DepotDownloader's own window.
+3. Complete the password and Steam Guard prompts in the **Steam sign-in** window Setup opens.
 4. Start the game with the `Launch Surgeon Simulator 2 - 1.3.7.cmd` launcher Setup creates in that folder.
 
-Setup installs the supported game build, x64 BepInEx, and the latest SS2 Revive release. DepotDownloader handles Steam credentials in its own window; SS2 Revive Setup never reads or stores them.
+Setup installs the supported game build, x64 BepInEx, and the latest SS2 Revive release. You type your password and Steam Guard code straight into DepotDownloader in that window; SS2 Revive Setup never reads or stores them. If the download fails, Setup explains the likely cause and points to a diagnostic log of DepotDownloader's output.
 
 The setup executable is currently unsigned, so Windows may show a SmartScreen warning.
 
