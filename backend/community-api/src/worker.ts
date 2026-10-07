@@ -233,7 +233,7 @@ async function route(
   if (path === "/v1/catalog") {
     requireMethod(request, "GET");
     await limitPublicRead(request, env, config, "catalog");
-    return withEdgeCache(request, ctx, () => catalogDocument(env, requestId, nowMs));
+    return withEdgeCache(request, ctx, requestId, () => catalogDocument(env, requestId, nowMs));
   }
 
   if (path === "/v1/maps") {
